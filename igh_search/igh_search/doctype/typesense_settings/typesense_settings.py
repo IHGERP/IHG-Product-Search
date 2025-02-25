@@ -106,9 +106,11 @@ def get_product_schema_data_qr_job(client=None):
             client = create_client()
         client.collections.create(product_schema)
         transfer_items = get_product_schema_data()
-        client.collections["product"].documents.import_(
-            transfer_items, {"action": "create"}
-        )
+        BATCH_SIZE = 5000  # Adjust as needed
+        for i in range(0, len(transfer_items), BATCH_SIZE):
+            batch = transfer_items[i : i + BATCH_SIZE]
+            client.collections["product"].documents.import_(batch, {"action": "upsert"})
+
     except Exception:
         frappe.db.set_value("Typesense Settings", "Typesense Settings", "is_sync", 0)
         frappe.log_error(
@@ -213,21 +215,7 @@ def get_product_schema_data(item_code=None):
 	DATE_FORMAT(it.creation, '%Y-%m-%d') AS creation,
     it.creation  AS creation_on,
 	it.promotion_item,
-	( 
-		SELECT JSON_ARRAYAGG(DISTINCT si_item_2.item_code)
-		FROM `tabSales Invoice Item` AS si_item_1
-		JOIN `tabSales Invoice Item` AS si_item_2 ON si_item_1.parent = si_item_2.parent
-		JOIN `tabSales Invoice` AS si ON si_item_1.parent = si.name
-		WHERE si_item_1.item_code = it.name
-		AND si_item_1.item_code != si_item_2.item_code
-		AND si.docstatus = 1
-		AND si.is_return = 0
-		AND si.company = '{company}'
-		GROUP BY si_item_1.item_code
-		ORDER BY COUNT(si_item_2.item_code) DESC
-		LIMIT 5
-	) AS frequently_bought_together,
-	
+	"" AS frequently_bought_together,
 	(COALESCE(
 		   (SELECT GROUP_CONCAT(b.barcode ORDER BY b.barcode SEPARATOR ', ') 
 			FROM `tabItem Barcode` AS b 
