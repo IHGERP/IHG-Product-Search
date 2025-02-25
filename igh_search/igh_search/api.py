@@ -57,7 +57,7 @@ def get_all_masters():
             if MASTER_DICT[master]!="Item Group":
                 master_data[master] = frappe.get_list(MASTER_DICT[master], pluck="name")
             else:
-                master_data[master] = frappe.get_list(MASTER_DICT[master], pluck="name",filters={"disable":0})
+                master_data[master] = frappe.get_list(MASTER_DICT[master], pluck="name",filters={"disable":0,"name":"All Item Groups"})
         master_data["product_type"] = ["Listed", "Unlisted", "Obsolete"]
         return master_data
     except Exception as e:
