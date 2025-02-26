@@ -154,6 +154,10 @@ def get_user_credentials(email, pwd):
         return {"key": 0, "message": "Incorrect Username or Password"}
     frappe.set_user("Administrator")
     user = frappe.get_doc("User", email)
+    if not user.api_key:
+        api_key = frappe.generate_hash(length=15)
+        user.api_key = api_key
+        user.save(ignore_permissions=True)
     api_generate = generate_keys(email)
     frappe.db.commit()
     delete_session(frappe.session.sid, "Administrator")
