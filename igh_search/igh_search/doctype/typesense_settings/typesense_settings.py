@@ -116,7 +116,9 @@ def get_product_schema_data_qr_job(client=None):
         frappe.log_error(
             title="get_product_schema_data_qr_job", message=frappe.get_traceback()
         )
-
+@frappe.whitelist()
+def initialize_syncing_item_group(self,method):
+    initialize_syncing_items()
 
 @frappe.whitelist()
 def initialize_syncing_items():

@@ -163,7 +163,7 @@ doc_events.update(
             "on_trash": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
         },
          "Item Group": {
-             "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.initialize_syncing_items",
+             "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.initialize_syncing_item_group",
          }
     }
 )
