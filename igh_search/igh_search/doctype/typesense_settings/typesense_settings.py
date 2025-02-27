@@ -189,7 +189,7 @@ def get_product_schema_data(item_code=None):
 	it.best_selling,
 	it.hot_product,
 	it.popular_product,
-	it.is_bundle_item,
+	it.custom_is_bundle_item AS is_bundle_item,
 	COALESCE(it.short_descrition,"") AS item_description,
     COALESCE(it.description,"") AS full_description,
 	COALESCE(it.stock_uom,"") as stock_uom,
@@ -245,8 +245,8 @@ def get_product_schema_data(item_code=None):
     ), 
 -1 ) AS last_brought
     
-From `tabItem` AS it
-where it.disabled =0
+From `tabItem` AS it INNER JOIN `tabItem Group` ig ON it.item_group = ig.name
+where it.disabled =0 and ig.disable = 0
 {item_code_main_filter}
 	""",
         as_dict=1,
