@@ -357,13 +357,24 @@ def update_value_item_wise(updated_data, client=None):
 
 
 def update_product_schema_data(self, method):
-    frappe.enqueue(
-        update_product_schema_data_qr_job,
-        timeout=10000,
-        queue="long",
-        job_name="update_product_schema_data_qr_job",
-        self_data=(self.as_dict()),
-    )
+    is_allow = 1
+    if self.get("doctype") == "Item Price" and self.get("selling") == 1:
+       item_group = frappe.db.get_value("Item",self.get("item_code"),"item_group")
+       item_group_check = frappe.db.get_value("Item Group",item_group,"disable")
+       if item_group_check:
+            is_allow = 0
+    elif self.get("doctype") == "Item" and self.get("disabled") == 0:
+        item_group_check = frappe.db.get_value("Item Group",self.item_group,"disable")
+        if item_group_check:
+            is_allow = 0
+    if is_allow:
+        frappe.enqueue(
+            update_product_schema_data_qr_job,
+            timeout=10000,
+            queue="long",
+            job_name="update_product_schema_data_qr_job",
+            self_data=(self.as_dict()),
+        )
 
 
 def update_product_schema_data_qr_job(self_data):

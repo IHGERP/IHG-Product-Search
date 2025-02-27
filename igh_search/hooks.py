@@ -162,6 +162,9 @@ doc_events.update(
             "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
             "on_trash": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
         },
+         "Item Group": {
+             "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.initialize_syncing_items",
+         }
     }
 )
 
