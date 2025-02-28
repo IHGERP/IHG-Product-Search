@@ -150,32 +150,35 @@ def get_user_credentials(email, pwd):
         login_manager = frappe.auth.LoginManager()
         login_manager.authenticate(user=email, pwd=pwd)
         login_manager.post_login()
+    
+        # frappe.log_error("session_user",frappe.session.user)
+        user_email = frappe.session.user
+        if frappe.db.exists("User",email):
+            user_email = email
+        else:
+            user_email = frappe.db.get_value("User",{"username":email})
+            email = user_email
+        user = frappe.get_doc("User", user_email)
+        frappe.set_user("Administrator")
+        if not user.api_key:
+            api_key = frappe.generate_hash(length=15)
+            user.api_key = api_key
+            user.save(ignore_permissions=True)
+        api_generate = generate_keys(email)
+        frappe.db.commit()
+        delete_session(frappe.session.sid, "Administrator")
+        return {
+            "key": 1,
+            "message": "Success",
+            "api_key": user.api_key,
+            "api_secret": api_generate["api_secret"],
+            "name": user.full_name,
+            "dob": user.birth_date,
+            "mobile_no": user.mobile_no,
+            "email": user.email,
+        }
     except frappe.exceptions.AuthenticationError:
-        frappe.log_error("session_user",frappe.session.user)
         return {"key": 0, "message": "Incorrect Username or Password"}
-    # frappe.log_error("session_user",frappe.session.user)
-    user_email = frappe.session.user
-    if frappe.db.exists("User",email):
-        user_email = email
-    else:
-        user_email = frappe.db.get_value("User",{"username":email})
-        email = user_email
-    user = frappe.get_doc("User", user_email)
-    frappe.set_user("Administrator")
-    if not user.api_key:
-        api_key = frappe.generate_hash(length=15)
-        user.api_key = api_key
-        user.save(ignore_permissions=True)
-    api_generate = generate_keys(email)
-    frappe.db.commit()
-    delete_session(frappe.session.sid, "Administrator")
-    return {
-        "key": 1,
-        "message": "Success",
-        "api_key": user.api_key,
-        "api_secret": api_generate["api_secret"],
-        "name": user.full_name,
-        "dob": user.birth_date,
-        "mobile_no": user.mobile_no,
-        "email": user.email,
-    }
+    except:
+        frappe.log_error(title="get_user_credentials", message=frappe.get_traceback())
+
