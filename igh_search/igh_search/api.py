@@ -154,7 +154,8 @@ def get_user_credentials(email, pwd):
         frappe.log_error("session_user",frappe.session.user)
         return {"key": 0, "message": "Incorrect Username or Password"}
     # frappe.log_error("session_user",frappe.session.user)
-    user = frappe.get_doc("User", frappe.session.user)
+    user_email = frappe.session.user
+    user = frappe.get_doc("User", user_email)
     frappe.set_user("Administrator")
     if not user.api_key:
         api_key = frappe.generate_hash(length=15)
