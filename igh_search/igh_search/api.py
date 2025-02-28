@@ -159,6 +159,7 @@ def get_user_credentials(email, pwd):
         user_email = email
     else:
         user_email = frappe.db.get_value("User",{"username":email})
+        email = user_email
     user = frappe.get_doc("User", user_email)
     frappe.set_user("Administrator")
     if not user.api_key:
