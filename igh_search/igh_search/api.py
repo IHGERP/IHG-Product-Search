@@ -151,6 +151,7 @@ def get_user_credentials(email, pwd):
         login_manager.authenticate(user=email, pwd=pwd)
         login_manager.post_login()
     except frappe.exceptions.AuthenticationError:
+        frappe.log_error("session_user",frappe.session.user)
         return {"key": 0, "message": "Incorrect Username or Password"}
     # frappe.log_error("session_user",frappe.session.user)
     user = frappe.get_doc("User", frappe.session.user)
