@@ -321,7 +321,6 @@ def get_wise_sold_last_30_days(company, item_code=""):
 				WHERE si.docstatus = 1
 				AND si.is_return = 0
 				AND si.posting_date BETWEEN (CURDATE() - INTERVAL 30 DAY) AND CURDATE()
-				AND si.company = '{company}'
 				and i.disabled = 0
                 {item_code}
 				GROUP BY sii.item_code
@@ -339,8 +338,7 @@ def get_item_wise_stock(company, item_code=""):
 				FROM `tabBin` AS bin
 				join `tabItem` as i on i.name = bin.item_code
 				JOIN `tabWarehouse` AS warehouse ON bin.warehouse = warehouse.name
-				WHERE warehouse.company = '{company}'
-				and i.disabled = 0
+				WHERE i.disabled = 0
 				{item_code}
 				GROUP BY bin.item_code
 			""",
