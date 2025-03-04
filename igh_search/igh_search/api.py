@@ -83,8 +83,7 @@ def warehouse_wise_stock(item_code, company):
              SELECT warehouse.name as warehouse ,bin.actual_qty
                 FROM `tabBin` AS bin
                 JOIN `tabWarehouse` AS warehouse ON bin.warehouse = warehouse.name
-                WHERE warehouse.company = '{company}'
-                AND bin.item_code = '{item_code}'
+                WHERE bin.item_code = '{item_code}'
             """,
         as_dict=1,
     )
