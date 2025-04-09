@@ -48,21 +48,42 @@ MASTER_DICT = {
     "diffuser": "Att Diffuser",
 }
 
+def get_model_names(model_name):
+    key = f"get_all_masters|{model_name}"
+    cached_value = frappe.cache().get_value(key)
+    if cached_value: 
+        return cached_value
+    result = frappe.get_list(model_name, pluck="name")
+    if model_name == "Item Group":
+        result = frappe.get_list(model_name, pluck="name",filters={"disable":0,"name":("!=","All Item Groups")})
+    frappe.cache().set_value(key, result, expires_in_sec=3600)
+    return result
 
 @frappe.whitelist()
 def get_all_masters():
     try:
-        master_data = {}
-        for master in MASTER_DICT:
-            if MASTER_DICT[master]!="Item Group":
-                master_data[master] = frappe.get_list(MASTER_DICT[master], pluck="name")
-            else:
-                master_data[master] = frappe.get_list(MASTER_DICT[master], pluck="name",filters={"disable":0,"name":("!=","All Item Groups")})
-        master_data["product_type"] = ["Listed", "Unlisted", "Obsolete"]
-        return master_data
+        master_data_dict = {key: get_model_names(value) for key, value in MASTER_DICT.items()}
+        master_data_dict["product_type"] = ["Listed", "Unlisted", "Obsolete"]
+        return master_data_dict
     except Exception as e:
+        # Log the error with a traceback for debugging
         frappe.log_error(title="get_all_masters", message=frappe.get_traceback())
-        frappe.throw(e)
+        # Re-raise the exception to inform the caller
+        frappe.throw(str(e))
+# @frappe.whitelist()
+# def get_all_masters():
+#     try:
+#         master_data = {}
+#         for master in MASTER_DICT:
+#             if MASTER_DICT[master]!="Item Group":
+#                 master_data[master] = frappe.get_list(MASTER_DICT[master], pluck="name")
+#             else:
+#                 master_data[master] = frappe.get_list(MASTER_DICT[master], pluck="name",filters={"disable":0,"name":("!=","All Item Groups")})
+#         master_data["product_type"] = ["Listed", "Unlisted", "Obsolete"]
+#         return master_data
+#     except Exception as e:
+#         frappe.log_error(title="get_all_masters", message=frappe.get_traceback())
+#         frappe.throw(e)
 
 
 @frappe.whitelist()
