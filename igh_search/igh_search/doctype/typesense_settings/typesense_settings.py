@@ -10,8 +10,8 @@ from datetime import datetime
 product_schema = {
     "name": "product",
     "fields": [
-        {"name": "item_code", "type": "string"},
-        {"name": "item_name", "type": "string"},
+        {"name": "item_code", "type": "string","infix": True},
+        {"name": "item_name", "type": "string","infix": True},
         {"name": "item_group", "type": "string", "facet": True},
         {"name": "item_description", "type": "string"},
         {"name": "full_description", "type": "string"},
