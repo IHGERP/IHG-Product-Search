@@ -1,21 +1,21 @@
 [project]
 name = "igh_search"
 authors = [
-    { name = "Aerele", email = "hello@aerele.in"}
+    { name = "Aerele", email = "hello@aerele.in" }
 ]
 description = "Integration with Typesense"
 requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [
-    # "frappe~=15.0.0" # Installed and managed by bench.
-    "typesense~=0.21.0",
+    "typesense~=0.21.0",  # Typesense Python client
+    # This app is compatible with Frappe/ERPNext v15
 ]
 
 [build-system]
 requires = ["flit_core >=3.4,<4"]
 build-backend = "flit_core.buildapi"
 
-# These dependencies are only installed when developer mode is enabled
+# Development dependencies
 [tool.bench.dev-dependencies]
-# package_name = "~=1.1.0"
+# Example: pytest = "~=7.4"
