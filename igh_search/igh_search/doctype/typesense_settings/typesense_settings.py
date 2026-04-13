@@ -339,6 +339,8 @@ def get_item_wise_stock(company, item_code=""):
 				join `tabItem` as i on i.name = bin.item_code
 				JOIN `tabWarehouse` AS warehouse ON bin.warehouse = warehouse.name
 				WHERE i.disabled = 0
+				AND LOWER(warehouse.name) NOT LIKE '%damage%'
+				AND LOWER(warehouse.name) NOT LIKE '%missing%'
 				{item_code}
 				GROUP BY bin.item_code
 			""",

@@ -105,6 +105,8 @@ def warehouse_wise_stock(item_code, company):
                 FROM `tabBin` AS bin
                 JOIN `tabWarehouse` AS warehouse ON bin.warehouse = warehouse.name
                 WHERE bin.item_code = '{item_code}'
+                AND LOWER(warehouse.name) NOT LIKE '%damage%'
+                AND LOWER(warehouse.name) NOT LIKE '%missing%'
             """,
         as_dict=1,
     )
@@ -201,4 +203,3 @@ def get_user_credentials(email, pwd):
         return {"key": 0, "message": "Incorrect Username or Password"}
     except:
         frappe.log_error(title="get_user_credentials", message=frappe.get_traceback())
-
