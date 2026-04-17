@@ -1,5 +1,6 @@
 import frappe
 from frappe.core.doctype.user.user import generate_keys
+from frappe.rate_limiter import rate_limit
 from frappe.sessions import delete_session
 
 MASTER_DICT = {
@@ -203,3 +204,20 @@ def get_user_credentials(email, pwd):
         return {"key": 0, "message": "Incorrect Username or Password"}
     except:
         frappe.log_error(title="get_user_credentials", message=frappe.get_traceback())
+
+
+def _get_ai_product_search_rate_limit():
+    from igh_search.igh_search.ai_product_search import get_ai_product_search_rate_limit
+
+    return get_ai_product_search_rate_limit()
+
+
+@frappe.whitelist(allow_guest=True)
+@rate_limit(limit=_get_ai_product_search_rate_limit, seconds=60, methods="POST")
+def ai_product_search(message=None, page_context=None):
+    if getattr(frappe.local, "request", None) and frappe.local.request.method != "POST":
+        frappe.throw("AI product search only supports POST requests.")
+
+    from igh_search.igh_search.ai_product_search import parse_product_search_intent
+
+    return parse_product_search_intent(message=message, page_context=page_context)

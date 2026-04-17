@@ -6,6 +6,7 @@ import typesense
 from frappe.model.document import Document
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
 from datetime import datetime
+from frappe.utils import flt
 
 product_schema = {
     "name": "product",
@@ -28,6 +29,7 @@ product_schema = {
         {"name": "frequently_bought_together", "type": "string"},
         {"name": "has_variants", "type": "int32", "facet": True},
         {"name": "stock", "type": "float", "facet": True},
+        {"name": "inventory_value", "type": "float"},
         {"name": "product_type", "type": "string", "facet": True},
         {"name": "category_list", "type": "string", "facet": True},
         {"name": "beam_angle", "type": "string", "facet": True},
@@ -58,6 +60,10 @@ product_schema = {
 
 class TypesenseSettings(Document):
     pass
+
+
+def calculate_inventory_value(stock=None, rate=None):
+    return flt(stock) * flt(rate)
 
 
 def create_client():
@@ -276,6 +282,9 @@ where it.disabled =0 and ig.disable = 0
                 )
         value["sold_last_30_days"] = sold_last_30_days.get(value["item_code"]) or 0
         value["stock"] = item_wise_stock.get(value["item_code"]) or 0
+        value["inventory_value"] = calculate_inventory_value(
+            value.get("stock"), value.get("rate")
+        )
         if value.get("frequently_bought_together"):
             value["frequently_bought_together"] = str(
                 value["frequently_bought_together"]
