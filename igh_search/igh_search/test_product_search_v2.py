@@ -85,3 +85,12 @@ class TestProductSearchV2(FrappeTestCase):
 
     def test_sanitize_sort_by_rejects_invalid_fields(self):
         self.assertIn("_text_match:desc", sanitize_sort_by("totally_invalid"))
+
+    def test_sanitize_sort_by_limits_typesense_to_three_fields(self):
+        default_sort = sanitize_sort_by("")
+        explicit_sort = sanitize_sort_by("rate:asc")
+        sku_sort = sanitize_sort_by("", sku_like=True)
+
+        self.assertLessEqual(len(default_sort.split(",")), 3)
+        self.assertLessEqual(len(explicit_sort.split(",")), 3)
+        self.assertLessEqual(len(sku_sort.split(",")), 3)

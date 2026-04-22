@@ -552,7 +552,7 @@ def get_similar_products_v2(item_code, limit=10, include_manual=1, feature_flag_
             "filter_by": " && ".join(filter_clauses),
             "per_page": max(cint(limit) * 5, 20),
             "page": 1,
-            "sort_by": "in_stock:desc,business_score:desc,popularity_score:desc,stock:desc",
+            "sort_by": "in_stock:desc,business_score:desc,stock:desc",
         }
     )
     for hit in candidate_response.get("hits", []):
@@ -629,18 +629,18 @@ def rank_search_hits(hits, query_text):
 
 def sanitize_sort_by(sort_by, sku_like=False):
     if sku_like:
-        return "_text_match:desc,in_stock:desc,business_score:desc,popularity_score:desc"
+        return "_text_match:desc,in_stock:desc,business_score:desc"
 
     value = cstr(sort_by or "").strip()
     if not value:
-        return "_text_match:desc,in_stock:desc,business_score:desc,popularity_score:desc"
+        return "_text_match:desc,in_stock:desc,business_score:desc"
 
     parts = value.split(":")
     field_name = parts[0]
     direction = parts[1] if len(parts) > 1 else "desc"
     if field_name not in SORT_FIELDS or direction not in {"asc", "desc"}:
-        return "_text_match:desc,in_stock:desc,business_score:desc,popularity_score:desc"
-    return f"_text_match:desc,{field_name}:{direction},in_stock:desc,business_score:desc"
+        return "_text_match:desc,in_stock:desc,business_score:desc"
+    return f"_text_match:desc,{field_name}:{direction},in_stock:desc"
 
 
 def is_sku_like(value):
