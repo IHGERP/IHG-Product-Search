@@ -1,18 +1,34 @@
 # Copyright (c) 2025, Aerele and contributors
 # For license information, please see license.txt
 
+import copy
+
 import frappe
 import typesense
-from frappe.model.document import Document
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
-from datetime import datetime
-from frappe.utils import flt
+from frappe.model.document import Document
+from frappe.utils import cint, cstr, flt
+
+from igh_search.igh_search.product_search_v2 import (
+    PRODUCT_V2_COLLECTION,
+    build_related_item_map,
+    compute_product_v2_document,
+    create_sync_log,
+    create_typesense_client,
+    delete_typesense_documents,
+    get_product_v2_schema,
+    get_v2_config,
+    is_dual_write_enabled,
+    sync_typesense_synonyms,
+    update_sync_log,
+)
+
 
 product_schema = {
     "name": "product",
     "fields": [
-        {"name": "item_code", "type": "string","infix": True},
-        {"name": "item_name", "type": "string","infix": True},
+        {"name": "item_code", "type": "string", "infix": True},
+        {"name": "item_name", "type": "string", "infix": True},
         {"name": "item_group", "type": "string", "facet": True},
         {"name": "item_description", "type": "string"},
         {"name": "full_description", "type": "string"},
@@ -67,68 +83,72 @@ def calculate_inventory_value(stock=None, rate=None):
 
 
 def create_client():
-    client_details = frappe.get_doc("Typesense Settings")
-    client = typesense.Client(
-        {
-            "nodes": [
-                {
-                    "host": client_details.host,
-                    "port": client_details.port,
-                    "protocol": client_details.protocol,
-                }
-            ],
-            "api_key": client_details.get_password("api_key"),
-            "connection_timeout_seconds": 120,
-        }
-    )
-
-    return client
+    return create_typesense_client()
 
 
 def sync_items_to_typesense(client):
-    try:
-        client.collections["product"].delete()
-    except typesense.exceptions.ObjectNotFound as e:
-        if e.args[0] == 404:
-            frappe.msgprint(
-                "Collection 'product' does not exist. Creating a new one..."
-            )
-        else:
-            frappe.db.set_value(
-                "Typesense Settings", "Typesense Settings", "is_sync", 0
-            )
-            raise e
+    log_name = create_sync_log(
+        trigger_type="full_sync",
+        source_doctype="Typesense Settings",
+        source_docname="Typesense Settings",
+        collection_name=_get_sync_collections_label(),
+        item_codes=[],
+    )
     frappe.enqueue(
         get_product_schema_data_qr_job,
         timeout=10000,
         queue="long",
         job_name="get_product_schema_data",
+        enqueue_after_commit=True,
+        log_name=log_name,
     )
 
 
-def get_product_schema_data_qr_job(client=None):
-    try:
-        if not client:
-            client = create_client()
-        client.collections.create(product_schema)
-        transfer_items = get_product_schema_data()
-        BATCH_SIZE = 5000  # Adjust as needed
-        for i in range(0, len(transfer_items), BATCH_SIZE):
-            batch = transfer_items[i : i + BATCH_SIZE]
-            client.collections["product"].documents.import_(batch, {"action": "upsert"})
+def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
+    client = client or create_client()
+    update_sync_log(log_name, "Running", retry_count=retry_count, started=True)
 
-    except Exception:
-        frappe.db.set_value("Typesense Settings", "Typesense Settings", "is_sync", 0)
-        frappe.log_error(
-            title="get_product_schema_data_qr_job", message=frappe.get_traceback()
+    try:
+        collections = [(product_schema["name"], product_schema)]
+        if is_dual_write_enabled():
+            collections.append((PRODUCT_V2_COLLECTION, get_product_v2_schema()))
+
+        for collection_name, schema in collections:
+            recreate_collection(client, collection_name, schema)
+
+        payload = get_product_schema_data(version="both")
+        import_documents_in_batches(client, product_schema["name"], payload["v1"])
+        if is_dual_write_enabled():
+            import_documents_in_batches(client, PRODUCT_V2_COLLECTION, payload["v2"])
+            sync_typesense_synonyms(client, PRODUCT_V2_COLLECTION)
+
+        frappe.db.set_value(
+            "Typesense Settings", "Typesense Settings", "is_sync", 0, update_modified=False
         )
+        update_sync_log(log_name, "Success", retry_count=retry_count, finished=True)
+    except Exception:
+        frappe.db.set_value(
+            "Typesense Settings", "Typesense Settings", "is_sync", 0, update_modified=False
+        )
+        _retry_job(
+            job_method=get_product_schema_data_qr_job,
+            job_kwargs={"log_name": log_name},
+            retry_count=retry_count,
+            log_name=log_name,
+            title="get_product_schema_data_qr_job",
+        )
+
+
 @frappe.whitelist()
-def initialize_syncing_item_group(self,method):
+def initialize_syncing_item_group(self, method):
     initialize_syncing_items()
+
 
 @frappe.whitelist()
 def initialize_syncing_items():
-    frappe.db.set_value("Typesense Settings", "Typesense Settings", "is_sync", 1)
+    frappe.db.set_value(
+        "Typesense Settings", "Typesense Settings", "is_sync", 1, update_modified=False
+    )
     client = create_client()
     sync_items_to_typesense(client)
 
@@ -162,248 +182,470 @@ def item_custom_fields():
             ),
         ]
     }
-
     create_custom_fields(field)
 
 
-def get_product_schema_data(item_code=None):
+def get_product_schema_data(item_code=None, version="v1"):
+    rows = fetch_item_base_data(item_code)
+    related_map = build_related_item_map([row["item_code"] for row in rows]) if rows else {}
+    v1_payload = build_v1_documents(rows)
+    v2_payload = [compute_product_v2_document(row, related_map=related_map) for row in rows]
+
+    if version == "v1":
+        return v1_payload
+    if version == "v2":
+        return v2_payload
+    if version == "both":
+        return {"v1": v1_payload, "v2": v2_payload}
+
+    frappe.throw("Unsupported product schema version")
+
+
+def fetch_item_base_data(item_codes=None):
     company, price_list = frappe.db.get_value(
         "E Commerce Settings", "E Commerce Settings", ["company", "price_list"]
     )
-    item_code_main_filter = ""
-    item_code_filter = ""
-    if item_code:
-        if str(type(item_code)) == "<class 'list'>" and len(item_code) == 1:
-            item_code = item_code[0]
-            item_code_filter = f" And i.name = '{item_code}' "
-            item_code_main_filter = f" And it.name = '{item_code}'"
-        else:
-            item_code = tuple(item_code)
-            item_code_filter = f" And i.name in {item_code} "
-            item_code_main_filter = f" And it.name in {item_code}"
-    offer_price_list = "Promo"
-    item_price_list_data = get_item_wise__price_list(
-        price_list, offer_price_list, item_code=item_code_filter
-    )
-    sold_last_30_days = get_wise_sold_last_30_days(company, item_code=item_code_filter)
-    item_wise_stock = get_item_wise_stock(company, item_code=item_code_filter)
+    item_codes = normalize_item_codes(item_codes)
+    item_code_filter_item = get_item_filter_sql(item_codes, alias="it")
+    item_code_filter_price = get_item_filter_sql(item_codes, alias="i")
 
-    data = frappe.db.sql(
-        f""" SELECT it.name as item_code ,
-	it.name as id,
-	COALESCE(it.item_name,"") as item_name,
-	COALESCE(it.item_group, '') AS item_group,
-	it.has_variants,
-	it.best_selling,
-	it.hot_product,
-	it.popular_product,
-	it.custom_is_bundle_item AS is_bundle_item,
-	COALESCE(it.short_descrition,"") AS item_description,
-    COALESCE(it.description,"") AS full_description,
-	COALESCE(it.stock_uom,"") as stock_uom,
-	COALESCE(it.product_type, '') AS product_type,
-	COALESCE(it.category_list, '') AS category_list,
-	COALESCE(it.beam_angle, '') AS beam_angle,
-	COALESCE(it.lumen_output, '') AS lumen_output,
-	COALESCE(it.mounting, '') AS mounting,
-	COALESCE(it.ip_rate, '') AS ip_rate,
-	COALESCE(it.lamp_type, '') AS lamp_type,
-	COALESCE(it.power, '') AS power,
-	COALESCE(it.input, '') AS input,
-	COALESCE(it.dimension, '') AS dimension,
-	COALESCE(it.material, '') AS material,
-	COALESCE(it.body_finish, '') AS body_finish,
-	COALESCE(CAST(it.warranty_ AS CHAR), '') AS warranty_,
-	COALESCE(it.output_voltage, '') AS output_voltage,
-	COALESCE(it.output_current, '') AS output_current,
-	COALESCE(it.color_temp_, '') AS color_temp_,
-	COALESCE(it.image, '') AS website_image_url,
-	COALESCE(it.brand, '') AS brand,
-	it.new_arrival,
-	DATE_FORMAT(it.creation, '%Y-%m-%d') AS creation,
-    it.creation  AS creation_on,
-	it.promotion_item,
-	"" AS frequently_bought_together,
-	(COALESCE(
-		   (SELECT GROUP_CONCAT(b.barcode ORDER BY b.barcode SEPARATOR ', ') 
-			FROM `tabItem Barcode` AS b 
-			WHERE b.parent = it.name),
-		   ""
-	   ) )AS barcode,
-    COALESCE( 
-    (SELECT DATEDIFF(CURDATE(), si.posting_date) AS last_sold
-     FROM `tabSales Invoice` AS si
-     JOIN `tabSales Invoice Item` AS sii ON sii.parent = si.name
-     WHERE si.docstatus = 1
-       AND sii.item_code = it.name
-       AND si.is_return = 0
-     ORDER BY si.posting_date DESC 
-     LIMIT 1
-    ), 
--1 ) AS last_sold,
-    COALESCE( 
-    (SELECT DATEDIFF(CURDATE(), si.posting_date) AS last_brought
-     FROM `tabPurchase Receipt` AS si
-     JOIN `tabPurchase Receipt Item` AS sii ON sii.parent = si.name
-     WHERE si.docstatus = 1
-       AND sii.item_code = it.name
-       AND si.is_return = 0
-     ORDER BY si.posting_date DESC 
-     LIMIT 1
-    ), 
--1 ) AS last_brought
-    
-From `tabItem` AS it INNER JOIN `tabItem Group` ig ON it.item_group = ig.name
-where it.disabled =0 and ig.disable = 0
-{item_code_main_filter}
-	""",
+    item_price_list_data = get_item_wise__price_list(
+        price_list, "Promo", item_code=item_code_filter_price
+    )
+    sold_last_30_days = get_wise_sold_last_30_days(company, item_code=item_code_filter_price)
+    item_wise_stock = get_item_wise_stock(company, item_code=item_code_filter_price)
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT
+            it.name AS item_code,
+            it.name AS id,
+            COALESCE(it.item_name, "") AS item_name,
+            COALESCE(it.item_group, "") AS item_group,
+            COALESCE(ig.disable, 0) AS item_group_disabled,
+            COALESCE(it.disabled, 0) AS disabled,
+            COALESCE(it.variant_of, "") AS variant_of,
+            COALESCE(parent.item_name, "") AS parent_item_name,
+            COALESCE(it.has_variants, 0) AS has_variants,
+            COALESCE(it.best_selling, 0) AS best_selling,
+            COALESCE(it.hot_product, 0) AS hot_product,
+            COALESCE(it.popular_product, 0) AS popular_product,
+            COALESCE(it.custom_is_bundle_item, 0) AS is_bundle_item,
+            COALESCE(it.short_descrition, "") AS item_description,
+            COALESCE(it.description, "") AS full_description,
+            COALESCE(it.stock_uom, "") AS stock_uom,
+            COALESCE(it.product_type, "") AS product_type,
+            COALESCE(it.category_list, "") AS category_list,
+            COALESCE(it.beam_angle, "") AS beam_angle,
+            COALESCE(it.lumen_output, "") AS lumen_output,
+            COALESCE(it.mounting, "") AS mounting,
+            COALESCE(it.ip_rate, "") AS ip_rate,
+            COALESCE(it.lamp_type, "") AS lamp_type,
+            COALESCE(it.power, "") AS power,
+            COALESCE(it.input, "") AS input,
+            COALESCE(it.dimension, "") AS dimension,
+            COALESCE(it.material, "") AS material,
+            COALESCE(it.body_finish, "") AS body_finish,
+            COALESCE(CAST(it.warranty_ AS CHAR), "") AS warranty_,
+            COALESCE(it.output_voltage, "") AS output_voltage,
+            COALESCE(it.output_current, "") AS output_current,
+            COALESCE(it.color_temp_, "") AS color_temp_,
+            COALESCE(it.image, "") AS website_image_url,
+            COALESCE(it.brand, "") AS brand,
+            COALESCE(it.new_arrival, 0) AS new_arrival,
+            COALESCE(it.promotion_item, 0) AS promotion_item,
+            DATE_FORMAT(it.creation, '%Y-%m-%d') AS creation,
+            it.creation AS creation_raw,
+            it.modified AS modified,
+            COALESCE(
+                (
+                    SELECT GROUP_CONCAT(b.barcode ORDER BY b.barcode SEPARATOR ', ')
+                    FROM `tabItem Barcode` AS b
+                    WHERE b.parent = it.name
+                ),
+                ""
+            ) AS barcode,
+            COALESCE(
+                (
+                    SELECT DATEDIFF(CURDATE(), si.posting_date)
+                    FROM `tabSales Invoice` AS si
+                    JOIN `tabSales Invoice Item` AS sii ON sii.parent = si.name
+                    WHERE si.docstatus = 1
+                        AND sii.item_code = it.name
+                        AND si.is_return = 0
+                    ORDER BY si.posting_date DESC
+                    LIMIT 1
+                ),
+                -1
+            ) AS last_sold,
+            COALESCE(
+                (
+                    SELECT DATEDIFF(CURDATE(), pr.posting_date)
+                    FROM `tabPurchase Receipt` AS pr
+                    JOIN `tabPurchase Receipt Item` AS pri ON pri.parent = pr.name
+                    WHERE pr.docstatus = 1
+                        AND pri.item_code = it.name
+                        AND pr.is_return = 0
+                    ORDER BY pr.posting_date DESC
+                    LIMIT 1
+                ),
+                -1
+            ) AS last_brought
+        FROM `tabItem` AS it
+        LEFT JOIN `tabItem Group` AS ig ON it.item_group = ig.name
+        LEFT JOIN `tabItem` AS parent ON parent.name = it.variant_of
+        WHERE 1 = 1
+        {item_code_filter_item}
+        """,
         as_dict=1,
     )
-    for value in data:
-        creation_on = datetime.strptime(
-            str(value["creation_on"]), "%Y-%m-%d %H:%M:%S.%f"
-        )
-        creation_on = round(creation_on.timestamp(), 2)
-        value["creation_on"] = creation_on
-        rate_offer_rate = item_price_list_data.get(value["item_code"])
-        value["rate"] = 0
-        value["offer_rate"] = 0
-        value["discount_percentage"] = 0
-        if rate_offer_rate:
-            value["rate"] = rate_offer_rate.get("price_list_rate") or 0
-            value["offer_rate"] = rate_offer_rate.get("offer_rate") or 0
-            if (
-                value["rate"]
-                and value["offer_rate"]
-                and value["rate"] > value["offer_rate"]
-            ):
-                value["discount_percentage"] = round(
-                    ((value["rate"] - value["offer_rate"]) / value["rate"]) * 100, 2
-                )
-        value["sold_last_30_days"] = sold_last_30_days.get(value["item_code"]) or 0
-        value["stock"] = item_wise_stock.get(value["item_code"]) or 0
-        value["inventory_value"] = calculate_inventory_value(
-            value.get("stock"), value.get("rate")
-        )
-        if value.get("frequently_bought_together"):
-            value["frequently_bought_together"] = str(
-                value["frequently_bought_together"]
-            )
-        else:
-            value["frequently_bought_together"] = ""
 
-    return data
+    for row in rows:
+        rate_offer_rate = item_price_list_data.get(row["item_code"], {})
+        row["rate"] = rate_offer_rate.get("price_list_rate") or 0
+        row["offer_rate"] = rate_offer_rate.get("offer_rate") or 0
+        row["discount_percentage"] = 0
+        if row["rate"] and row["offer_rate"] and row["rate"] > row["offer_rate"]:
+            row["discount_percentage"] = round(
+                ((row["rate"] - row["offer_rate"]) / row["rate"]) * 100, 2
+            )
+        row["sold_last_30_days"] = sold_last_30_days.get(row["item_code"]) or 0
+        row["stock"] = item_wise_stock.get(row["item_code"]) or 0
+        row["inventory_value"] = calculate_inventory_value(row.get("stock"), row.get("rate"))
+        row["frequently_bought_together"] = ""
+
+    return rows
+
+
+def build_v1_documents(rows):
+    payload = []
+    for row in rows:
+        if cint(row.get("disabled")) or cint(row.get("item_group_disabled")):
+            continue
+        value = copy.deepcopy(row)
+        value["creation_on"] = _to_timestamp(value.get("creation_raw"))
+        payload.append(
+            {
+                "item_code": value["item_code"],
+                "id": value["id"],
+                "item_name": value["item_name"],
+                "item_group": value["item_group"],
+                "has_variants": cint(value["has_variants"]),
+                "best_selling": cint(value["best_selling"]),
+                "hot_product": cint(value["hot_product"]),
+                "popular_product": cint(value["popular_product"]),
+                "is_bundle_item": cint(value["is_bundle_item"]),
+                "item_description": value["item_description"],
+                "full_description": value["full_description"],
+                "stock_uom": value["stock_uom"],
+                "product_type": value["product_type"],
+                "category_list": value["category_list"],
+                "beam_angle": value["beam_angle"],
+                "lumen_output": value["lumen_output"],
+                "mounting": value["mounting"],
+                "ip_rate": value["ip_rate"],
+                "lamp_type": value["lamp_type"],
+                "power": value["power"],
+                "input": value["input"],
+                "dimension": value["dimension"],
+                "material": value["material"],
+                "body_finish": value["body_finish"],
+                "warranty_": value["warranty_"],
+                "output_voltage": value["output_voltage"],
+                "output_current": value["output_current"],
+                "color_temp_": value["color_temp_"],
+                "website_image_url": value["website_image_url"],
+                "brand": value["brand"],
+                "new_arrival": cint(value["new_arrival"]),
+                "creation": value["creation"],
+                "creation_on": value["creation_on"],
+                "promotion_item": cint(value["promotion_item"]),
+                "frequently_bought_together": value["frequently_bought_together"],
+                "barcode": value["barcode"],
+                "last_sold": cint(value["last_sold"]),
+                "last_brought": cint(value["last_brought"]),
+                "rate": flt(value["rate"]),
+                "offer_rate": flt(value["offer_rate"]),
+                "discount_percentage": flt(value["discount_percentage"]),
+                "sold_last_30_days": flt(value["sold_last_30_days"]),
+                "stock": flt(value["stock"]),
+                "inventory_value": flt(value["inventory_value"]),
+            }
+        )
+    return payload
 
 
 def get_item_wise__price_list(price_list, offer_price_list, item_code=""):
     item_price_list_data = frappe.db.sql(
-        f""" SELECT DISTINCT 
-            i.name as id,                                                                                                                                                                
-            ip.price_list_rate as price_list_rate,                                                                                                                                                          
-            ip2.price_list_rate as offer_rate                                                                                                                                                               
-      FROM `tabItem` i                                                                                                                                                                                
-      left join `tabItem Price` as ip on (i.name = ip.item_code and ip.price_list = '{price_list}' and ip.selling = 1 and IF(ip.valid_from, IF(ip.valid_from <= CURDATE(), 1, 0), 1) = 1 and IF(ip.valid_upto, IF(ip.valid_upto >= CURDATE(), 1, 0), 1) = 1)                                                                                                                                                             
-      left join `tabItem Price` as ip2 on (i.name = ip2.item_code and ip2.price_list = '{offer_price_list}' and ip2.selling = 1 and IF(ip2.valid_from, IF(ip2.valid_from <= CURDATE(), 1, 0), 1) = 1 and IF(ip2.valid_upto, IF(ip2.valid_upto >= CURDATE(), 1, 0), 1) = 1)                                                                                                                                                   
-      where
-      i.disabled = 0
-      {item_code}                                                                                                                                                                              
-       GROUP BY i.name """,
+        f"""
+        SELECT DISTINCT
+            i.name AS id,
+            ip.price_list_rate AS price_list_rate,
+            ip2.price_list_rate AS offer_rate
+        FROM `tabItem` i
+        LEFT JOIN `tabItem Price` AS ip ON (
+            i.name = ip.item_code
+            AND ip.price_list = '{price_list}'
+            AND ip.selling = 1
+            AND IF(ip.valid_from, IF(ip.valid_from <= CURDATE(), 1, 0), 1) = 1
+            AND IF(ip.valid_upto, IF(ip.valid_upto >= CURDATE(), 1, 0), 1) = 1
+        )
+        LEFT JOIN `tabItem Price` AS ip2 ON (
+            i.name = ip2.item_code
+            AND ip2.price_list = '{offer_price_list}'
+            AND ip2.selling = 1
+            AND IF(ip2.valid_from, IF(ip2.valid_from <= CURDATE(), 1, 0), 1) = 1
+            AND IF(ip2.valid_upto, IF(ip2.valid_upto >= CURDATE(), 1, 0), 1) = 1
+        )
+        WHERE 1 = 1
+        {item_code}
+        GROUP BY i.name
+        """,
         as_dict=1,
     )
-    item_price_list_data = {
+    return {
         item["id"]: {
             "price_list_rate": item["price_list_rate"],
             "offer_rate": item["offer_rate"],
         }
         for item in item_price_list_data
     }
-    return item_price_list_data
 
 
 def get_wise_sold_last_30_days(company, item_code=""):
     sold_last_30_days = frappe.db.sql(
         f"""
-				SELECT DISTINCT sii.item_code as id ,SUM(sii.stock_qty) as sold_qty
-				FROM `tabSales Invoice` AS si
-				JOIN `tabSales Invoice Item` AS sii ON sii.parent = si.name
-				join `tabItem` as i on i.name = sii.item_code
-				WHERE si.docstatus = 1
-				AND si.is_return = 0
-				AND si.posting_date BETWEEN (CURDATE() - INTERVAL 30 DAY) AND CURDATE()
-				and i.disabled = 0
-                {item_code}
-				GROUP BY sii.item_code
-			""",
+        SELECT DISTINCT sii.item_code AS id, SUM(sii.stock_qty) AS sold_qty
+        FROM `tabSales Invoice` AS si
+        JOIN `tabSales Invoice Item` AS sii ON sii.parent = si.name
+        JOIN `tabItem` AS i ON i.name = sii.item_code
+        WHERE si.docstatus = 1
+            AND si.is_return = 0
+            AND si.posting_date BETWEEN (CURDATE() - INTERVAL 30 DAY) AND CURDATE()
+            {item_code}
+        GROUP BY sii.item_code
+        """,
         as_dict=1,
     )
-    sold_last_30_days = {item["id"]: item["sold_qty"] for item in sold_last_30_days}
-    return sold_last_30_days
+    return {item["id"]: item["sold_qty"] for item in sold_last_30_days}
 
 
 def get_item_wise_stock(company, item_code=""):
     item_wise_stock = frappe.db.sql(
         f"""
-				SELECT DISTINCT bin.item_code as id , COALESCE(SUM(bin.actual_qty),0)  as stock
-				FROM `tabBin` AS bin
-				join `tabItem` as i on i.name = bin.item_code
-				JOIN `tabWarehouse` AS warehouse ON bin.warehouse = warehouse.name
-				WHERE i.disabled = 0
-				AND LOWER(warehouse.name) NOT LIKE '%damage%'
-				AND LOWER(warehouse.name) NOT LIKE '%missing%'
-				{item_code}
-				GROUP BY bin.item_code
-			""",
+        SELECT DISTINCT bin.item_code AS id, COALESCE(SUM(bin.actual_qty), 0) AS stock
+        FROM `tabBin` AS bin
+        JOIN `tabItem` AS i ON i.name = bin.item_code
+        JOIN `tabWarehouse` AS warehouse ON bin.warehouse = warehouse.name
+        WHERE LOWER(warehouse.name) NOT LIKE '%damage%'
+            AND LOWER(warehouse.name) NOT LIKE '%missing%'
+            {item_code}
+        GROUP BY bin.item_code
+        """,
         as_dict=1,
     )
-    item_wise_stock = {item["id"]: item["stock"] for item in item_wise_stock}
-    return item_wise_stock
+    return {item["id"]: item["stock"] for item in item_wise_stock}
 
 
-def update_value_item_wise(updated_data, client=None):
-    if not client:
-        client = create_client()
-    client.collections[product_schema.get("name")].documents.import_(
-        updated_data, {"action": "upsert"}
-    )
+def update_value_item_wise(updated_data, client=None, collection_name=None):
+    if not updated_data:
+        return
+    client = client or create_client()
+    collection_name = collection_name or product_schema["name"]
+    client.collections[collection_name].documents.import_(updated_data, {"action": "upsert"})
 
 
 def update_product_schema_data(self, method):
-    is_allow = 1
-    if self.get("doctype") == "Item Price" and self.get("selling") == 1:
-       item_group = frappe.db.get_value("Item",self.get("item_code"),"item_group")
-       item_group_check = frappe.db.get_value("Item Group",item_group,"disable")
-       if item_group_check:
-            is_allow = 0
-    elif self.get("doctype") == "Item" and self.get("disabled") == 0:
-        item_group_check = frappe.db.get_value("Item Group",self.item_group,"disable")
-        if item_group_check:
-            is_allow = 0
-    if is_allow:
-        frappe.enqueue(
-            update_product_schema_data_qr_job,
-            timeout=10000,
-            queue="long",
-            job_name="update_product_schema_data_qr_job",
-            self_data=(self.as_dict()),
-        )
+    if self.get("doctype") == "Item Price" and not cint(self.get("selling") or 0):
+        return
+
+    self_data = extract_doc_event_payload(self, method)
+    log_name = create_sync_log(
+        trigger_type=f"incremental:{self_data.get('doctype')}:{method}",
+        source_doctype=self_data.get("doctype"),
+        source_docname=self_data.get("name"),
+        collection_name=_get_sync_collections_label(),
+        item_codes=get_affected_item_codes(self_data),
+    )
+    frappe.enqueue(
+        update_product_schema_data_qr_job,
+        timeout=10000,
+        queue="long",
+        job_name="update_product_schema_data_qr_job",
+        enqueue_after_commit=True,
+        self_data=self_data,
+        retry_count=0,
+        log_name=log_name,
+    )
 
 
-def update_product_schema_data_qr_job(self_data):
+def extract_doc_event_payload(doc, method):
+    payload = doc.as_dict()
+    payload["event_method"] = method
+    if payload.get("doctype") == "Item":
+        previous_doc = None
+        if hasattr(doc, "get_doc_before_save"):
+            previous_doc = doc.get_doc_before_save()
+        if previous_doc:
+            payload["_previous_variant_of"] = previous_doc.get("variant_of")
+            payload["_previous_item_group"] = previous_doc.get("item_group")
+    return payload
+
+
+def get_item_codes_for_typesense_update(self_data):
+    return get_affected_item_codes(self_data)
+
+
+def get_affected_item_codes(self_data):
+    doctype = self_data.get("doctype")
+    affected = set()
+
+    if doctype == "Item":
+        item_code = self_data.get("item_code") or self_data.get("name")
+        if item_code:
+            affected.add(item_code)
+            affected.update(get_variant_codes_for_parent(item_code))
+        for parent_code in (
+            self_data.get("variant_of"),
+            self_data.get("_previous_variant_of"),
+        ):
+            if parent_code:
+                affected.add(parent_code)
+                affected.update(get_variant_codes_for_parent(parent_code))
+    elif doctype == "Item Price":
+        if self_data.get("item_code"):
+            affected.add(self_data.get("item_code"))
+    elif doctype == "Related Items":
+        affected.update([self_data.get("item_1"), self_data.get("item_2")])
+    elif doctype == "Item Group":
+        group_name = self_data.get("name")
+        if group_name:
+            affected.update(
+                frappe.get_all("Item", filters={"item_group": group_name}, pluck="name")
+            )
+
+    for row in self_data.get("items") or []:
+        if row.get("item_code"):
+            affected.add(row.get("item_code"))
+
+    return sorted(code for code in affected if code)
+
+
+def get_variant_codes_for_parent(parent_code):
+    if not parent_code:
+        return []
+    return frappe.get_all("Item", filters={"variant_of": parent_code}, pluck="name")
+
+
+def update_product_schema_data_qr_job(self_data, retry_count=0, log_name=None):
+    update_sync_log(log_name, "Running", retry_count=retry_count, started=True)
+    client = create_client()
+
     try:
         doctype = self_data.get("doctype")
-        item_code = []
-        if doctype == "Item Price" and self_data.get("selling") == 1:
-            item_code = [self_data.get("item_code")]
-        elif doctype == "Item" and self_data.get("disabled") == 0:
-            item_code = [self_data.get("item_code")]
-        elif self_data.get("items"):
-            item_code = [
-                item_code_vlaue.get("item_code")
-                for item_code_vlaue in self_data.get("items")
-            ]
-        get_product_schema_data_value = get_product_schema_data(item_code)
-        update_value_item_wise(get_product_schema_data_value)
+        event_method = self_data.get("event_method")
+        affected_item_codes = get_affected_item_codes(self_data)
+        if doctype == "Item" and event_method == "on_trash":
+            deleted_code = self_data.get("item_code") or self_data.get("name")
+            delete_typesense_documents(client, product_schema["name"], [deleted_code])
+            if is_dual_write_enabled():
+                delete_typesense_documents(client, PRODUCT_V2_COLLECTION, [deleted_code])
+            if affected_item_codes:
+                affected_item_codes = [
+                    item_code for item_code in affected_item_codes if item_code != deleted_code
+                ]
+
+        payload = get_product_schema_data(affected_item_codes, version="both")
+        active_v1_codes = {doc["item_code"] for doc in payload["v1"]}
+        missing_v1_codes = [
+            item_code for item_code in affected_item_codes if item_code not in active_v1_codes
+        ]
+        if missing_v1_codes:
+            delete_typesense_documents(client, product_schema["name"], missing_v1_codes)
+
+        update_value_item_wise(payload["v1"], client=client, collection_name=product_schema["name"])
+
+        if is_dual_write_enabled():
+            active_v2_codes = {doc["item_code"] for doc in payload["v2"]}
+            if doctype == "Item" and event_method == "on_trash":
+                delete_typesense_documents(
+                    client,
+                    PRODUCT_V2_COLLECTION,
+                    [item_code for item_code in affected_item_codes if item_code not in active_v2_codes],
+                )
+            update_value_item_wise(
+                payload["v2"], client=client, collection_name=PRODUCT_V2_COLLECTION
+            )
+
+        update_sync_log(log_name, "Success", retry_count=retry_count, finished=True)
     except Exception:
-        frappe.log_error(
-            title="update_product_schema_data_qr_job", message=frappe.get_traceback()
+        _retry_job(
+            job_method=update_product_schema_data_qr_job,
+            job_kwargs={"self_data": self_data, "log_name": log_name},
+            retry_count=retry_count,
+            log_name=log_name,
+            title="update_product_schema_data_qr_job",
         )
+
+
+def recreate_collection(client, collection_name, schema):
+    try:
+        client.collections[collection_name].delete()
+    except typesense.exceptions.ObjectNotFound:
+        pass
+    client.collections.create(schema)
+
+
+def import_documents_in_batches(client, collection_name, documents, batch_size=5000):
+    for index in range(0, len(documents), batch_size):
+        batch = documents[index : index + batch_size]
+        if batch:
+            client.collections[collection_name].documents.import_(batch, {"action": "upsert"})
+
+
+def normalize_item_codes(item_codes):
+    if not item_codes:
+        return []
+    if isinstance(item_codes, str):
+        return [item_codes]
+    if isinstance(item_codes, tuple):
+        return list(item_codes)
+    return [item_code for item_code in item_codes if item_code]
+
+
+def get_item_filter_sql(item_codes, alias):
+    item_codes = normalize_item_codes(item_codes)
+    if not item_codes:
+        return ""
+    if len(item_codes) == 1:
+        return f" AND {alias}.name = {frappe.db.escape(item_codes[0])}"
+    values = ", ".join(frappe.db.escape(item_code) for item_code in item_codes)
+    return f" AND {alias}.name IN ({values})"
+
+
+def _retry_job(job_method, job_kwargs, retry_count, log_name, title):
+    max_retry_count = get_v2_config()["max_retry_count"]
+    if retry_count < max_retry_count:
+        update_sync_log(log_name, "Retrying", retry_count=retry_count + 1)
+        frappe.enqueue(
+            job_method,
+            timeout=10000,
+            queue="long",
+            job_name=title,
+            retry_count=retry_count + 1,
+            **job_kwargs,
+        )
+        return
+
+    update_sync_log(log_name, "Dead Letter", retry_count=retry_count, failure_reason=frappe.get_traceback(), finished=True)
+    frappe.log_error(title=title, message=frappe.get_traceback())
+
+
+def _to_timestamp(value):
+    if not value:
+        return 0
+    return int(frappe.utils.get_datetime(value).timestamp())
+
+
+def _get_sync_collections_label():
+    return "product,product_v2" if is_dual_write_enabled() else "product"

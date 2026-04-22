@@ -2,6 +2,12 @@ import frappe
 from frappe.core.doctype.user.user import generate_keys
 from frappe.rate_limiter import rate_limit
 from frappe.sessions import delete_session
+from igh_search.igh_search.product_search_v2 import (
+    get_similar_products_v2 as get_similar_products_v2_impl,
+    get_sync_health_summary,
+    search_products_v2 as search_products_v2_impl,
+    suggest_products_v2 as suggest_products_v2_impl,
+)
 
 MASTER_DICT = {
     "item_group": "Item Group",
@@ -221,3 +227,52 @@ def ai_product_search(message=None, page_context=None):
     from igh_search.igh_search.ai_product_search import parse_product_search_intent
 
     return parse_product_search_intent(message=message, page_context=page_context)
+
+
+@frappe.whitelist()
+def search_products_v2(
+    query=None,
+    filters=None,
+    sort_by=None,
+    page=1,
+    page_length=20,
+    include_inactive=0,
+    item_code_hint=None,
+    feature_flag_override=0,
+):
+    return search_products_v2_impl(
+        query=query,
+        filters=filters,
+        sort_by=sort_by,
+        page=page,
+        page_length=page_length,
+        include_inactive=include_inactive,
+        item_code_hint=item_code_hint,
+        feature_flag_override=feature_flag_override,
+    )
+
+
+@frappe.whitelist()
+def suggest_products_v2(query=None, limit=10, feature_flag_override=0):
+    return suggest_products_v2_impl(
+        query=query, limit=limit, feature_flag_override=feature_flag_override
+    )
+
+
+@frappe.whitelist()
+def get_similar_products_v2(
+    item_code, limit=10, include_manual=1, feature_flag_override=0
+):
+    return get_similar_products_v2_impl(
+        item_code=item_code,
+        limit=limit,
+        include_manual=include_manual,
+        feature_flag_override=feature_flag_override,
+    )
+
+
+@frappe.whitelist()
+def get_typesense_sync_health():
+    if "System Manager" not in frappe.get_roles():
+        frappe.throw("Only System Manager can view sync health.")
+    return get_sync_health_summary()

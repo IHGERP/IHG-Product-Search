@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "warm_white",
+      "canonical": "3000k",
+      "aliases": ["warm white", "warmwhite"]
+    },
+    {
+      "id": "cool_white",
+      "canonical": "6500k",
+      "aliases": ["cool white", "coolwhite"]
+    },
+    {
+      "id": "cct",
+      "canonical": "color temperature",
+      "aliases": ["cct", "colour temperature"]
+    },
+    {
+      "id": "driver",
+      "canonical": "led driver",
+      "aliases": ["driver", "power supply"]
+    },
+    {
+      "id": "downlight",
+      "canonical": "downlight",
+      "aliases": ["down light", "down-light"]
+    }
+  ]
+}
