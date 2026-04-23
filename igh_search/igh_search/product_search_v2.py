@@ -1,6 +1,7 @@
 import copy
 import json
 from datetime import datetime
+from json import JSONDecodeError
 
 import frappe
 import typesense
@@ -69,6 +70,7 @@ FILTER_FIELDS = {
     "price_bucket",
 }
 SORT_FIELDS = {
+    "discount_percentage",
     "rate",
     "offer_rate",
     "stock",
@@ -78,6 +80,10 @@ SORT_FIELDS = {
     "business_score",
     "creation_ts",
     "modified_ts",
+}
+SORT_FIELD_ALIASES = {
+    "creation": "creation_ts",
+    "creation_on": "creation_ts",
 }
 FACET_FIELDS = [
     "brand",
@@ -607,33 +613,58 @@ def search_products_v2(
     ensure_query_access(feature_flag_override=feature_flag_override)
 
     client = create_typesense_client()
-    normalized_query = normalize_text(query)
-    query_text = normalized_query or "*"
-    sku_like = is_sku_like(query or item_code_hint)
+    parsed_filters = parse_search_filters(filters)
+    query_resolution = resolve_effective_query(query=query, item_code_hint=item_code_hint)
+    query_text = query_resolution["effective_query"]
+    sku_like = query_resolution["sku_like"]
+    sort_resolution = resolve_sort_by(sort_by, sku_like=sku_like)
 
     search_parameters = {
         "q": query_text,
         "query_by": "item_code_normalized,item_code,item_name_normalized,item_name,searchable_text,brand,category_list,parent_item_code,parent_item_name",
         "query_by_weights": "12,10,8,6,4,2,2,2,2",
         "facet_by": ",".join(FACET_FIELDS),
-        "filter_by": build_filter_by(filters=filters, include_inactive=include_inactive),
+        "filter_by": build_filter_by(filters=parsed_filters, include_inactive=include_inactive),
         "page": max(cint(page), 1),
         "per_page": max(min(cint(page_length), 100), 1),
-        "sort_by": sanitize_sort_by(sort_by, sku_like=sku_like),
+        "sort_by": sort_resolution["final_sort"],
         "include_fields": ",".join(SEARCH_RESULT_FIELDS),
     }
     if sku_like:
         search_parameters["prefix"] = "true,true,false,false,false,false,false,false,false"
         search_parameters["num_typos"] = "0,0,1,1,1,1,1,1,1"
 
+    log_search_request(
+        "request",
+        {
+            "query": cstr(query or ""),
+            "item_code_hint": cstr(item_code_hint or ""),
+            "effective_query": query_text,
+            "normalized_query": query_resolution["normalized_query"],
+            "requested_sort": cstr(sort_by or ""),
+            "aliased_sort": sort_resolution["aliased_sort"],
+            "final_sort": sort_resolution["final_sort"],
+            "sku_like": sku_like,
+            "parsed_filters": parsed_filters,
+            "fallback_reasons": sort_resolution["fallback_reasons"],
+            "search_parameters": search_parameters,
+        },
+    )
+
     response = client.collections[get_default_collection()].documents.search(
         search_parameters
     )
-    response["hits"] = rank_search_hits(response.get("hits", []), query_text)
-    response["applied_filters"] = _coerce_json(filters) or {}
+    if sort_resolution["should_rerank"]:
+        response["hits"] = rank_search_hits(response.get("hits", []), query_text)
+    response["applied_filters"] = parsed_filters
     response["query_debug"] = {
-        "normalized_query": normalized_query,
+        "normalized_query": query_resolution["normalized_query"],
+        "effective_query": query_text,
         "sku_like": sku_like,
+        "requested_sort": cstr(sort_by or ""),
+        "aliased_sort": sort_resolution["aliased_sort"],
+        "applied_sort": sort_resolution["final_sort"],
+        "fallback_reasons": sort_resolution["fallback_reasons"],
         "search_parameters": search_parameters,
     }
     return response
@@ -745,6 +776,18 @@ def get_product_document(item_code, include_inactive=0):
     return documents[0] if documents else None
 
 
+def resolve_effective_query(query=None, item_code_hint=None):
+    normalized_query = normalize_text(query)
+    normalized_hint = normalize_text(item_code_hint)
+    effective_query = normalized_query or normalized_hint or "*"
+    return {
+        "normalized_query": normalized_query,
+        "normalized_item_code_hint": normalized_hint,
+        "effective_query": effective_query,
+        "sku_like": is_sku_like(query or item_code_hint),
+    }
+
+
 def rank_search_hits(hits, query_text):
     normalized_query = normalize_text(query_text)
 
@@ -775,19 +818,62 @@ def rank_search_hits(hits, query_text):
 
 
 def sanitize_sort_by(sort_by, sku_like=False):
-    if sku_like:
-        return "_text_match:desc,in_stock:desc,business_score:desc"
-
     value = cstr(sort_by or "").strip()
     if not value:
         return "_text_match:desc,in_stock:desc,business_score:desc"
 
     parts = value.split(":")
-    field_name = parts[0]
+    field_name = SORT_FIELD_ALIASES.get(parts[0], parts[0])
     direction = parts[1] if len(parts) > 1 else "desc"
     if field_name not in SORT_FIELDS or direction not in {"asc", "desc"}:
         return "_text_match:desc,in_stock:desc,business_score:desc"
     return f"_text_match:desc,{field_name}:{direction},in_stock:desc"
+
+
+def resolve_sort_by(sort_by, sku_like=False):
+    requested_sort = cstr(sort_by or "").strip()
+    fallback_reasons = []
+    aliased_sort = requested_sort
+    should_rerank = False
+
+    if not requested_sort:
+        should_rerank = True
+        return {
+            "requested_sort": requested_sort,
+            "aliased_sort": aliased_sort,
+            "final_sort": sanitize_sort_by(""),
+            "should_rerank": should_rerank,
+            "fallback_reasons": fallback_reasons,
+        }
+
+    parts = requested_sort.split(":")
+    raw_field_name = parts[0]
+    field_name = SORT_FIELD_ALIASES.get(raw_field_name, raw_field_name)
+    direction = parts[1] if len(parts) > 1 else "desc"
+    aliased_sort = f"{field_name}:{direction}"
+    if raw_field_name in SORT_FIELD_ALIASES:
+        fallback_reasons.append(
+            f"sort_alias:{raw_field_name}->{SORT_FIELD_ALIASES[raw_field_name]}"
+        )
+
+    if field_name not in SORT_FIELDS or direction not in {"asc", "desc"}:
+        should_rerank = True
+        fallback_reasons.append("unsupported_sort:fallback_to_relevance")
+        return {
+            "requested_sort": requested_sort,
+            "aliased_sort": aliased_sort,
+            "final_sort": sanitize_sort_by(""),
+            "should_rerank": should_rerank,
+            "fallback_reasons": fallback_reasons,
+        }
+
+    return {
+        "requested_sort": requested_sort,
+        "aliased_sort": aliased_sort,
+        "final_sort": sanitize_sort_by(aliased_sort, sku_like=sku_like),
+        "should_rerank": False,
+        "fallback_reasons": fallback_reasons,
+    }
 
 
 def is_sku_like(value):
@@ -860,6 +946,20 @@ def _coerce_json(value):
     return json.loads(value)
 
 
+def parse_search_filters(filters):
+    try:
+        return _coerce_json(filters) or {}
+    except (TypeError, ValueError, JSONDecodeError):
+        log_search_request(
+            "invalid_filters",
+            {
+                "filters": filters,
+                "error": "Invalid filters payload supplied to search_products_v2",
+            },
+        )
+        frappe.throw(_("Invalid filters payload for product search V2"))
+
+
 def _build_filter_clause(field_name, value):
     if isinstance(value, list):
         joined = ",".join(f'"{_escape_filter_value(item)}"' for item in value if item not in (None, ""))
@@ -913,3 +1013,14 @@ def _unique_strings(values):
         seen.add(cleaned_value)
         cleaned_values.append(cleaned_value)
     return cleaned_values
+
+
+def log_search_request(event, payload):
+    try:
+        frappe.logger().info(
+            "V2 Product Search %s: %s",
+            event,
+            json.dumps(payload, ensure_ascii=True, default=str),
+        )
+    except Exception:
+        pass
