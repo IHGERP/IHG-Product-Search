@@ -78,6 +78,62 @@ class TypesenseSettings(Document):
     pass
 
 
+BASE_PRICE_LIST = "RRP"
+PROMO_PRICE_LIST = "Promo"
+ITEM_EXTRA_FIELD_MAP = {
+    "series": "series",
+    "image": "image",
+    "is_stock_item": "is_stock_item",
+    "height": "height",
+    "width": "width",
+    "depth": "depth",
+    "custom_moq": "custom_moq",
+    "range": "range",
+    "lamp_qty": "lamp_qty",
+    "safety_class": "safety_class",
+    "eec": "eec",
+    "reflector": "reflector",
+    "att_heat_sink": "att_heat_sink",
+    "output_signal": "output_signal",
+    "power_factor": "power_factor",
+    "working_temp": "working_temp",
+    "life_time": "life_time",
+    "light_intensity": "light_intensity",
+    "light_source": "light_source",
+    "cri": "cri",
+    "efficacy": "efficacy",
+    "operating_frequency": "operating_frequency",
+    "input_signal": "input_signal",
+    "function": "function",
+    "cut_out": "cut_out",
+    "shade_material": "shade_material",
+    "shade_finish": "shade_finish",
+    "pole_dimension": "pole_dimension",
+    "suspended_length": "suspended_length",
+    "warranty_type": "warranty_type_",
+    "warranty_in_yrs": "warranty_in_yrs",
+    "diffuser": "diffuser",
+    "custom_esma_certified": "custom_esma_certified",
+    "primary_material": "primary_material",
+    "secondary_material": "secondary_material",
+    "capacity": "capacity",
+    "country_of_orgin": "country_of_orgin",
+    "number_of_pieces": "_number_of_pieces",
+    "leather_finish": "leather_finish",
+    "fabric_finish": "fabric_finish",
+    "primary_color": "primary_color",
+    "secondary_color": "secondary_color",
+    "remarks": "remarks",
+}
+ITEM_MULTISELECT_FIELDS = (
+    "bought_together",
+    "similar_range",
+    "related_products",
+    "accessories",
+    "must_use",
+)
+
+
 def calculate_inventory_value(stock=None, rate=None):
     return flt(stock) * flt(rate)
 
@@ -202,15 +258,13 @@ def get_product_schema_data(item_code=None, version="v1"):
 
 
 def fetch_item_base_data(item_codes=None):
-    company, price_list = frappe.db.get_value(
-        "E Commerce Settings", "E Commerce Settings", ["company", "price_list"]
-    )
+    company = frappe.db.get_value("E Commerce Settings", "E Commerce Settings", "company")
     item_codes = normalize_item_codes(item_codes)
     item_code_filter_item = get_item_filter_sql(item_codes, alias="it")
     item_code_filter_price = get_item_filter_sql(item_codes, alias="i")
 
     item_price_list_data = get_item_wise__price_list(
-        price_list, "Promo", item_code=item_code_filter_price
+        BASE_PRICE_LIST, PROMO_PRICE_LIST, item_code=item_code_filter_price
     )
     sold_last_30_days = get_wise_sold_last_30_days(company, item_code=item_code_filter_price)
     item_wise_stock = get_item_wise_stock(company, item_code=item_code_filter_price)
@@ -314,6 +368,7 @@ def fetch_item_base_data(item_codes=None):
         row["inventory_value"] = calculate_inventory_value(row.get("stock"), row.get("rate"))
         row["frequently_bought_together"] = ""
 
+    enrich_rows_with_item_metadata(rows)
     return rows
 
 
@@ -373,6 +428,129 @@ def build_v1_documents(rows):
             }
         )
     return payload
+
+
+def enrich_rows_with_item_metadata(rows):
+    item_codes = [row.get("item_code") for row in rows if row.get("item_code")]
+    if not item_codes:
+        return
+
+    scalar_values = get_item_scalar_field_values(item_codes)
+    multiselect_values = get_item_multiselect_field_values(item_codes)
+
+    for row in rows:
+        item_code = row.get("item_code")
+        row.update(scalar_values.get(item_code, {}))
+        row.update(multiselect_values.get(item_code, {}))
+        row["image"] = row.get("image") or row.get("website_image_url") or ""
+        row["description"] = (
+            row.get("description")
+            or row.get("full_description")
+            or row.get("item_description")
+            or ""
+        )
+        row["input_voltage"] = row.get("input_voltage") or row.get("input") or ""
+        row["warranty"] = row.get("warranty") or row.get("warranty_") or ""
+        row["warranty_type"] = row.get("warranty_type") or row.get("warranty_type_") or ""
+        row["color_temp"] = row.get("color_temp") or row.get("color_temp_") or ""
+
+
+def get_item_scalar_field_values(item_codes):
+    available_columns = set(frappe.db.get_table_columns("Item"))
+    fields = ["name"]
+    alias_map = {}
+
+    for target_field, source_field in ITEM_EXTRA_FIELD_MAP.items():
+        if source_field in available_columns:
+            fields.append(source_field)
+            alias_map[target_field] = source_field
+
+    if len(fields) == 1:
+        return {}
+
+    item_rows = frappe.get_all(
+        "Item",
+        filters={"name": ["in", item_codes]},
+        fields=fields,
+        limit_page_length=len(item_codes),
+    )
+    return {
+        item_row["name"]: {
+            target_field: item_row.get(source_field)
+            for target_field, source_field in alias_map.items()
+        }
+        for item_row in item_rows
+    }
+
+
+def get_item_multiselect_field_values(item_codes):
+    item_meta = frappe.get_meta("Item")
+    values_by_item = {
+        item_code: {fieldname: [] for fieldname in ITEM_MULTISELECT_FIELDS}
+        for item_code in item_codes
+    }
+
+    for fieldname in ITEM_MULTISELECT_FIELDS:
+        docfield = item_meta.get_field(fieldname)
+        if not docfield or docfield.fieldtype != "Table MultiSelect" or not docfield.options:
+            continue
+
+        child_doctype = docfield.options
+        if not frappe.db.table_exists(child_doctype):
+            continue
+
+        value_field = get_multiselect_value_field(child_doctype)
+        if not value_field:
+            continue
+
+        child_rows = frappe.get_all(
+            child_doctype,
+            filters={
+                "parent": ["in", item_codes],
+                "parenttype": "Item",
+                "parentfield": fieldname,
+            },
+            fields=["parent", value_field],
+            order_by="idx asc",
+            limit_page_length=0,
+        )
+        for child_row in child_rows:
+            value = child_row.get(value_field)
+            if value:
+                values_by_item.setdefault(
+                    child_row["parent"],
+                    {name: [] for name in ITEM_MULTISELECT_FIELDS},
+                )[fieldname].append(value)
+
+    return values_by_item
+
+
+def get_multiselect_value_field(child_doctype):
+    child_columns = set(frappe.db.get_table_columns(child_doctype))
+    if "link_name" in child_columns:
+        return "link_name"
+
+    child_meta = frappe.get_meta(child_doctype)
+    ignored_fields = {
+        "name",
+        "parent",
+        "parentfield",
+        "parenttype",
+        "idx",
+        "doctype",
+        "owner",
+        "modified_by",
+        "creation",
+        "modified",
+        "docstatus",
+    }
+    for docfield in child_meta.fields:
+        if docfield.fieldname in ignored_fields:
+            continue
+        if docfield.fieldtype in {"Link", "Dynamic Link", "Data", "Autocomplete"}:
+            return docfield.fieldname
+
+    return None
 
 
 def get_item_wise__price_list(price_list, offer_price_list, item_code=""):

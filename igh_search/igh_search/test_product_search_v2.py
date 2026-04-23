@@ -1,6 +1,7 @@
 from frappe.tests.utils import FrappeTestCase
 
 from igh_search.igh_search.product_search_v2 import (
+    SEARCH_RESULT_FIELDS,
     build_filter_by,
     calculate_similarity_score,
     get_product_v2_schema,
@@ -94,3 +95,10 @@ class TestProductSearchV2(FrappeTestCase):
         self.assertLessEqual(len(default_sort.split(",")), 3)
         self.assertLessEqual(len(explicit_sort.split(",")), 3)
         self.assertLessEqual(len(sku_sort.split(",")), 3)
+
+    def test_search_result_fields_stay_lean_but_include_frontend_essentials(self):
+        self.assertIn("image", SEARCH_RESULT_FIELDS)
+        self.assertIn("stock_uom", SEARCH_RESULT_FIELDS)
+        self.assertIn("color_temp", SEARCH_RESULT_FIELDS)
+        self.assertIn("ip_rate", SEARCH_RESULT_FIELDS)
+        self.assertNotIn("description", SEARCH_RESULT_FIELDS)

@@ -103,6 +103,43 @@ FACET_FIELDS = [
     "stock_bucket",
     "price_bucket",
 ]
+SEARCH_RESULT_FIELDS = (
+    "item_code",
+    "item_name",
+    "brand",
+    "category_list",
+    "item_group",
+    "product_type",
+    "image",
+    "stock_uom",
+    "rate",
+    "offer_rate",
+    "discount_percentage",
+    "stock",
+    "in_stock",
+    "priority_score",
+    "popularity_score",
+    "business_score",
+    "is_active",
+    "variant_of",
+    "parent_item_code",
+    "parent_item_name",
+    "power",
+    "color_temp",
+    "ip_rate",
+    "beam_angle",
+    "mounting",
+    "lamp_type",
+    "material",
+    "body_finish",
+    "warranty",
+    "input_voltage",
+    "output_voltage",
+    "output_current",
+    "spec_summary",
+    "manual_alternative_codes",
+    "manual_related_codes",
+)
 
 PRODUCT_V2_SCHEMA = {
     "name": PRODUCT_V2_COLLECTION,
@@ -127,19 +164,66 @@ PRODUCT_V2_SCHEMA = {
         {"name": "brand", "type": "string", "facet": True},
         {"name": "category_list", "type": "string", "facet": True},
         {"name": "item_group", "type": "string", "facet": True},
+        {"name": "stock_uom", "type": "string", "optional": True},
+        {"name": "series", "type": "string", "optional": True},
+        {"name": "image", "type": "string", "optional": True},
+        {"name": "is_stock_item", "type": "bool", "optional": True},
+        {"name": "has_variants", "type": "bool", "optional": True},
         {"name": "product_type", "type": "string", "facet": True},
+        {"name": "height", "type": "string", "optional": True},
+        {"name": "width", "type": "string", "optional": True},
+        {"name": "depth", "type": "float", "optional": True},
+        {"name": "dimension", "type": "string", "optional": True},
+        {"name": "custom_moq", "type": "string", "optional": True},
+        {"name": "range", "type": "string", "optional": True},
+        {"name": "lamp_qty", "type": "string", "optional": True},
+        {"name": "safety_class", "type": "string", "optional": True},
+        {"name": "eec", "type": "string", "optional": True},
         {"name": "power", "type": "string", "facet": True},
         {"name": "color_temp", "type": "string", "facet": True},
         {"name": "ip_rate", "type": "string", "facet": True},
         {"name": "beam_angle", "type": "string", "facet": True},
+        {"name": "lumen_output", "type": "string", "optional": True},
+        {"name": "reflector", "type": "string", "optional": True},
         {"name": "mounting", "type": "string", "facet": True},
+        {"name": "att_heat_sink", "type": "string", "optional": True},
+        {"name": "output_signal", "type": "string", "optional": True},
+        {"name": "power_factor", "type": "string", "optional": True},
+        {"name": "working_temp", "type": "string", "optional": True},
+        {"name": "life_time", "type": "string", "optional": True},
         {"name": "body_finish", "type": "string", "facet": True},
         {"name": "input_voltage", "type": "string", "facet": True},
         {"name": "output_voltage", "type": "string", "facet": True},
         {"name": "output_current", "type": "string", "facet": True},
+        {"name": "light_intensity", "type": "string", "optional": True},
+        {"name": "light_source", "type": "string", "optional": True},
         {"name": "lamp_type", "type": "string", "facet": True},
+        {"name": "cri", "type": "string", "optional": True},
+        {"name": "efficacy", "type": "string", "optional": True},
+        {"name": "operating_frequency", "type": "string", "optional": True},
+        {"name": "input_signal", "type": "string", "optional": True},
+        {"name": "function", "type": "string", "optional": True},
+        {"name": "cut_out", "type": "string", "optional": True},
         {"name": "material", "type": "string", "facet": True},
+        {"name": "shade_material", "type": "string", "optional": True},
+        {"name": "shade_finish", "type": "string", "optional": True},
+        {"name": "pole_dimension", "type": "string", "optional": True},
+        {"name": "suspended_length", "type": "string", "optional": True},
+        {"name": "warranty_type", "type": "string", "optional": True},
         {"name": "warranty", "type": "string", "facet": True},
+        {"name": "warranty_in_yrs", "type": "float", "optional": True},
+        {"name": "diffuser", "type": "string", "optional": True},
+        {"name": "custom_esma_certified", "type": "bool", "optional": True},
+        {"name": "primary_material", "type": "string", "optional": True},
+        {"name": "secondary_material", "type": "string", "optional": True},
+        {"name": "capacity", "type": "string", "optional": True},
+        {"name": "country_of_orgin", "type": "string", "optional": True},
+        {"name": "number_of_pieces", "type": "string", "optional": True},
+        {"name": "leather_finish", "type": "string", "optional": True},
+        {"name": "fabric_finish", "type": "string", "optional": True},
+        {"name": "primary_color", "type": "string", "optional": True},
+        {"name": "secondary_color", "type": "string", "optional": True},
+        {"name": "remarks", "type": "string", "optional": True},
         {"name": "search_keywords", "type": "string"},
         {"name": "spec_summary", "type": "string"},
         {"name": "searchable_text", "type": "string"},
@@ -161,6 +245,11 @@ PRODUCT_V2_SCHEMA = {
         {"name": "manual_related_codes", "type": "string[]", "optional": True},
         {"name": "manual_alternative_codes", "type": "string[]", "optional": True},
         {"name": "manual_bought_together_codes", "type": "string[]", "optional": True},
+        {"name": "bought_together", "type": "string[]", "optional": True},
+        {"name": "similar_range", "type": "string[]", "optional": True},
+        {"name": "related_products", "type": "string[]", "optional": True},
+        {"name": "accessories", "type": "string[]", "optional": True},
+        {"name": "must_use", "type": "string[]", "optional": True},
         {"name": "similarity_signature", "type": "string"},
     ],
 }
@@ -361,23 +450,72 @@ def compute_product_v2_document(row, related_map=None):
         "parent_item_name": cstr(row.get("parent_item_name")),
         "parent_item_code_normalized": normalize_item_code(row.get("variant_of")),
         "parent_item_name_normalized": normalize_text(row.get("parent_item_name")),
-        "description": cstr(row.get("full_description") or row.get("item_description")),
+        "description": cstr(
+            row.get("description") or row.get("full_description") or row.get("item_description")
+        ),
+        "stock_uom": cstr(row.get("stock_uom")),
+        "series": cstr(row.get("series")),
+        "image": cstr(row.get("image") or row.get("website_image_url")),
         "brand": cstr(row.get("brand")),
         "category_list": cstr(row.get("category_list")),
         "item_group": cstr(row.get("item_group")),
+        "is_stock_item": bool(row.get("is_stock_item")),
+        "has_variants": bool(row.get("has_variants")),
         "product_type": cstr(row.get("product_type")),
+        "height": cstr(row.get("height")),
+        "width": cstr(row.get("width")),
+        "depth": flt(row.get("depth")),
+        "dimension": cstr(row.get("dimension")),
+        "custom_moq": cstr(row.get("custom_moq")),
+        "range": cstr(row.get("range")),
+        "lamp_qty": cstr(row.get("lamp_qty")),
+        "safety_class": cstr(row.get("safety_class")),
+        "eec": cstr(row.get("eec")),
         "power": cstr(row.get("power")),
-        "color_temp": normalize_color_temp(row.get("color_temp_")),
+        "color_temp": normalize_color_temp(row.get("color_temp") or row.get("color_temp_")),
         "ip_rate": normalize_ip_rate(row.get("ip_rate")),
         "beam_angle": cstr(row.get("beam_angle")),
+        "lumen_output": cstr(row.get("lumen_output")),
+        "reflector": cstr(row.get("reflector")),
         "mounting": cstr(row.get("mounting")),
+        "att_heat_sink": cstr(row.get("att_heat_sink")),
+        "output_signal": cstr(row.get("output_signal")),
+        "power_factor": cstr(row.get("power_factor")),
+        "working_temp": cstr(row.get("working_temp")),
+        "life_time": cstr(row.get("life_time")),
         "body_finish": cstr(row.get("body_finish")),
-        "input_voltage": cstr(row.get("input")),
+        "input_voltage": cstr(row.get("input_voltage") or row.get("input")),
         "output_voltage": cstr(row.get("output_voltage")),
         "output_current": cstr(row.get("output_current")),
+        "light_intensity": cstr(row.get("light_intensity")),
+        "light_source": cstr(row.get("light_source")),
         "lamp_type": cstr(row.get("lamp_type")),
+        "cri": cstr(row.get("cri")),
+        "efficacy": cstr(row.get("efficacy")),
+        "operating_frequency": cstr(row.get("operating_frequency")),
+        "input_signal": cstr(row.get("input_signal")),
+        "function": cstr(row.get("function")),
+        "cut_out": cstr(row.get("cut_out")),
         "material": cstr(row.get("material")),
-        "warranty": cstr(row.get("warranty_")),
+        "shade_material": cstr(row.get("shade_material")),
+        "shade_finish": cstr(row.get("shade_finish")),
+        "pole_dimension": cstr(row.get("pole_dimension")),
+        "suspended_length": cstr(row.get("suspended_length")),
+        "warranty_type": cstr(row.get("warranty_type") or row.get("warranty_type_")),
+        "warranty": cstr(row.get("warranty") or row.get("warranty_")),
+        "warranty_in_yrs": flt(row.get("warranty_in_yrs")),
+        "diffuser": cstr(row.get("diffuser")),
+        "custom_esma_certified": bool(row.get("custom_esma_certified")),
+        "primary_material": cstr(row.get("primary_material")),
+        "secondary_material": cstr(row.get("secondary_material")),
+        "capacity": cstr(row.get("capacity")),
+        "country_of_orgin": cstr(row.get("country_of_orgin")),
+        "number_of_pieces": cstr(row.get("number_of_pieces")),
+        "leather_finish": cstr(row.get("leather_finish")),
+        "fabric_finish": cstr(row.get("fabric_finish")),
+        "primary_color": cstr(row.get("primary_color")),
+        "secondary_color": cstr(row.get("secondary_color")),
+        "remarks": cstr(row.get("remarks")),
         "rate": flt(row.get("rate")),
         "offer_rate": flt(row.get("offer_rate")),
         "discount_percentage": flt(row.get("discount_percentage")),
@@ -410,6 +548,15 @@ def compute_product_v2_document(row, related_map=None):
     document["manual_bought_together_codes"] = manual_relationships.get(
         "bought_together", []
     )
+    document["bought_together"] = _unique_strings(
+        row.get("bought_together") or manual_relationships.get("bought_together", [])
+    )
+    document["similar_range"] = _unique_strings(row.get("similar_range"))
+    document["related_products"] = _unique_strings(
+        row.get("related_products") or manual_relationships.get("related", [])
+    )
+    document["accessories"] = _unique_strings(row.get("accessories"))
+    document["must_use"] = _unique_strings(row.get("must_use"))
     document["similarity_signature"] = build_similarity_signature(document)
     return document
 
@@ -473,7 +620,7 @@ def search_products_v2(
         "page": max(cint(page), 1),
         "per_page": max(min(cint(page_length), 100), 1),
         "sort_by": sanitize_sort_by(sort_by, sku_like=sku_like),
-        "include_fields": "item_code,item_name,brand,category_list,rate,offer_rate,stock,in_stock,priority_score,popularity_score,business_score,is_active,parent_item_code,parent_item_name,spec_summary,manual_alternative_codes,manual_related_codes",
+        "include_fields": ",".join(SEARCH_RESULT_FIELDS),
     }
     if sku_like:
         search_parameters["prefix"] = "true,true,false,false,false,false,false,false,false"
@@ -754,3 +901,15 @@ def _within_delta(source_value, candidate_value, delta):
 
 def _escape_filter_value(value):
     return cstr(value).replace('"', '\\"')
+
+
+def _unique_strings(values):
+    cleaned_values = []
+    seen = set()
+    for value in values or []:
+        cleaned_value = cstr(value).strip()
+        if not cleaned_value or cleaned_value in seen:
+            continue
+        seen.add(cleaned_value)
+        cleaned_values.append(cleaned_value)
+    return cleaned_values
