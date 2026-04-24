@@ -103,6 +103,98 @@ LEGACY_SORT_ALIASES = {
     "creation_on:desc": "creation:desc",
     "creation_on:asc": "creation:asc",
 }
+DISPLAY_FILTER_LABELS = {
+    "brand": "Brand",
+    "category_list": "Category",
+    "product_type": "Product Type",
+    "item_group": "Item Group",
+    "ip_rate": "IP Rating",
+    "power": "Power",
+    "color_temp": "Color Temperature",
+    "body_finish": "Body Finish",
+    "input_voltage": "Input Voltage",
+    "mounting": "Mounting",
+    "output_current": "Output Current",
+    "output_voltage": "Output Voltage",
+    "lamp_type": "Lamp Type",
+    "beam_angle": "Beam Angle",
+    "material": "Material",
+    "warranty": "Warranty",
+    "variant_of": "Variant Of",
+    "in_stock": "In Stock",
+    "rate_range": "Rate",
+    "offer_rate_range": "Offer Rate",
+    "discount_percentage_range": "Discount Percentage",
+    "stock_range": "Stock",
+    "sold_last_30_days_range": "Sold Last 30 Days",
+    "inventory_value_range": "Inventory Value",
+    "priority_score_range": "Priority Score",
+    "popularity_score_range": "Popularity Score",
+    "business_score_range": "Business Score",
+    "power_value_range": "Power",
+    "color_temp_kelvin_range": "Color Temp Kelvin",
+    "ip_rating_numeric_range": "IP Rating Numeric",
+}
+DISPLAY_FILTER_UNITS = {
+    "rate_range": "AED",
+    "offer_rate_range": "AED",
+    "inventory_value_range": "AED",
+    "discount_percentage_range": "%",
+    "power_value_range": "W",
+    "color_temp_kelvin_range": "K",
+    "output_current": "MA",
+    "input_voltage": "V",
+    "output_voltage": "V",
+}
+RANGE_QUERY_PATTERNS = {
+    "rate_range": (
+        r"\b(?:under|below|less than|over|above|more than)\s*(?:aed\s*)?\d+(?:\.\d+)?(?:\s*aed)?\b",
+        r"\bbetween\s*(?:aed\s*)?\d+(?:\.\d+)?(?:\s*aed)?\s*(?:and|to)\s*(?:aed\s*)?\d+(?:\.\d+)?(?:\s*aed)?\b",
+        r"\b\d+(?:\.\d+)?\s*aed\b",
+    ),
+    "power_value_range": (
+        r"\b(?:under|below|less than|over|above|more than|between)\s*\d+(?:\.\d+)?\s*w\b(?:\s*(?:and|to)\s*\d+(?:\.\d+)?\s*w)?",
+        r"\b\d+(?:\.\d+)?\s*w\b",
+    ),
+    "color_temp_kelvin_range": (r"\b\d{4,5}\s*k\b",),
+    "ip_rating_numeric_range": (r"\bip\s*\d{2,3}\b",),
+}
+DISPLAY_QUERY_STOPWORDS = {
+    "show",
+    "find",
+    "need",
+    "search",
+    "products",
+    "product",
+    "items",
+    "item",
+}
+DISPLAY_QUERY_PHRASES = {
+    "in_stock": (
+        "in stock",
+        "stock available",
+        "available stock",
+        "available now",
+        "only in stock",
+    ),
+    "stock:desc": (
+        "high stock",
+        "most stock",
+        "stock high to low",
+        "quantity wise",
+        "quantity high to low",
+    ),
+    "stock:asc": ("low stock", "stock low to high", "quantity low to high"),
+    "discount_percentage:desc": (
+        "highest discount",
+        "discount high to low",
+        "biggest discount",
+        "best offer",
+    ),
+    "creation:desc": ("latest", "newest", "recent"),
+    "rate:asc": ("cheapest", "lowest price", "low price", "price low to high"),
+    "rate:desc": ("highest price", "most expensive", "price high to low"),
+}
 
 
 def build_default_filters():
@@ -1257,6 +1349,172 @@ def _to_boolean(value):
     return value in {"true", "1", "yes", "y"}
 
 
+def _display_label(filter_key):
+    return DISPLAY_FILTER_LABELS.get(filter_key, cstr(filter_key).replace("_", " ").title())
+
+
+def _format_number_for_display(value):
+    number = flt(value)
+    if number.is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_filter_value_for_display(filter_key, value):
+    cleaned = cstr(value).strip()
+    if not cleaned:
+        return ""
+    unit = DISPLAY_FILTER_UNITS.get(filter_key)
+    normalized = normalize_text(cleaned)
+    if filter_key == "in_stock":
+        return "Yes" if _to_boolean(value) else ""
+    if filter_key in {"color_temp", "ip_rate"}:
+        return cleaned.upper().replace(" ", "")
+    if unit and re.fullmatch(r"-?\d+(?:\.\d+)?", cleaned):
+        return f"{_format_number_for_display(cleaned)} {unit}"
+    if unit and filter_key in {"input_voltage", "output_voltage", "output_current"} and normalized.endswith(unit.lower()):
+        return cleaned.upper().replace(" ", "")
+    return cleaned
+
+
+def _is_default_range_value(range_key, value):
+    defaults = RANGE_FILTER_DEFAULTS.get(range_key)
+    if defaults is None:
+        return True
+    return sanitize_range(value, defaults) == defaults
+
+
+def _format_range_for_display(range_key, value):
+    defaults = RANGE_FILTER_DEFAULTS.get(range_key)
+    if defaults is None:
+        return ""
+    sanitized = sanitize_range(value, defaults)
+    minimum = sanitized.get("min")
+    maximum = sanitized.get("max")
+    unit = DISPLAY_FILTER_UNITS.get(range_key, "")
+    min_changed = minimum != defaults["min"]
+    max_changed = maximum != defaults["max"]
+
+    if min_changed and max_changed:
+        text = f"{_format_number_for_display(minimum)}-{_format_number_for_display(maximum)}"
+    elif min_changed:
+        text = f"Above {_format_number_for_display(minimum)}"
+    elif max_changed:
+        text = f"Below {_format_number_for_display(maximum)}"
+    else:
+        return ""
+
+    return f"{text} {unit}".strip()
+
+
+def build_ai_display_filters(applied_filters):
+    filters = applied_filters or {}
+    display_filters = []
+    hidden_range_keys = set()
+
+    if filters.get("color_temp"):
+        hidden_range_keys.add("color_temp_kelvin_range")
+    if filters.get("ip_rate"):
+        hidden_range_keys.add("ip_rating_numeric_range")
+    if filters.get("power"):
+        hidden_range_keys.add("power_value_range")
+
+    for filter_key in ARRAY_FILTER_KEYS:
+        values = filters.get(filter_key) or []
+        for value in values:
+            value_display = _format_filter_value_for_display(filter_key, value)
+            if not value_display:
+                continue
+            display_filters.append(
+                {
+                    "key": filter_key,
+                    "label": _display_label(filter_key),
+                    "value": value,
+                    "value_display": value_display,
+                    "type": "multi" if len(values) > 1 else "single",
+                }
+            )
+
+    for filter_key in BOOLEAN_FILTER_KEYS:
+        if not filters.get(filter_key):
+            continue
+        display_filters.append(
+            {
+                "key": filter_key,
+                "label": _display_label(filter_key),
+                "value": True,
+                "value_display": _format_filter_value_for_display(filter_key, True),
+                "type": "boolean",
+            }
+        )
+
+    for range_key in RANGE_FILTER_DEFAULTS:
+        if range_key in hidden_range_keys or _is_default_range_value(range_key, filters.get(range_key)):
+            continue
+        value_display = _format_range_for_display(range_key, filters.get(range_key))
+        if not value_display:
+            continue
+        display_filters.append(
+            {
+                "key": range_key,
+                "label": _display_label(range_key),
+                "value": sanitize_range(filters.get(range_key), RANGE_FILTER_DEFAULTS[range_key]),
+                "value_display": value_display,
+                "type": "range",
+            }
+        )
+
+    return display_filters
+
+
+def _replace_display_query_phrase(text, phrase):
+    if not phrase:
+        return text
+    return re.sub(rf"(?<![a-z0-9]){re.escape(normalize_text(phrase))}(?![a-z0-9])", " ", text)
+
+
+def build_ai_display_query(message, intent, applied_filters, applied_sort=""):
+    candidate = normalize_text(intent.get("query") or intent.get("item_code_hint") or message)
+    if not candidate:
+        return ""
+
+    filters = applied_filters or {}
+    if filters.get("in_stock"):
+        for phrase in DISPLAY_QUERY_PHRASES["in_stock"]:
+            candidate = _replace_display_query_phrase(candidate, phrase)
+
+    for phrase in DISPLAY_QUERY_PHRASES.get(cstr(applied_sort).strip(), ()):
+        candidate = _replace_display_query_phrase(candidate, phrase)
+
+    for range_key, patterns in RANGE_QUERY_PATTERNS.items():
+        if _is_default_range_value(range_key, filters.get(range_key)):
+            continue
+        for pattern in patterns:
+            candidate = re.sub(pattern, " ", candidate)
+
+    for filter_key in ARRAY_FILTER_KEYS:
+        for value in filters.get(filter_key) or []:
+            normalized_value = normalize_text(value)
+            if normalized_value:
+                candidate = _replace_display_query_phrase(candidate, normalized_value)
+
+    candidate = re.sub(r"\b(?:aed|w|k|ma|v)\b", " ", candidate)
+    candidate = re.sub(r"[^a-z0-9\s-]", " ", candidate)
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+    if not candidate:
+        return ""
+
+    residual_tokens = []
+    for token in candidate.split():
+        if token in DISPLAY_QUERY_STOPWORDS:
+            continue
+        if re.fullmatch(r"\d+(?:\.\d+)?", token):
+            continue
+        residual_tokens.append(token)
+
+    return " ".join(residual_tokens).strip()
+
+
 def sanitize_string_list(values, allowed_values):
     if not isinstance(values, list):
         return []
@@ -1711,15 +1969,19 @@ def ai_search_products_v2(
     ensure_query_access(feature_flag_override=feature_flag_override)
     intent = resolve_ai_search_intent(message=message, page_context=page_context, mode="fast")
     if not cstr(message).strip():
+        empty_filters = intent.get("filters", {})
+        empty_sort = intent.get("sort_by", "")
         return {
             "hits": [],
             "found": 0,
             "facet_counts": [],
             "resolved_intent": intent.get("resolved_intent", {}),
-            "applied_filters": intent.get("filters", {}),
-            "applied_sort": intent.get("sort_by", ""),
+            "applied_filters": empty_filters,
+            "applied_sort": empty_sort,
             "applied_relaxations": [],
             "explanation": intent.get("explanation", ""),
+            "display_query": build_ai_display_query(message, intent, empty_filters, empty_sort),
+            "display_filters": build_ai_display_filters(empty_filters),
             "query_debug": intent.get("query_debug", {}),
         }
 
@@ -1851,6 +2113,13 @@ def ai_search_products_v2(
     response["applied_sort"] = intent.get("sort_by", "")
     response["applied_relaxations"] = applied_relaxations
     response["explanation"] = intent.get("explanation", "")
+    response["display_query"] = build_ai_display_query(
+        message,
+        intent,
+        response["applied_filters"],
+        response["applied_sort"],
+    )
+    response["display_filters"] = build_ai_display_filters(response["applied_filters"])
     response["search_event_id"] = search_event_id
     response["quality_signals"] = quality_signals
     response["query_debug"] = {

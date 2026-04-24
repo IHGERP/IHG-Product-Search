@@ -6,6 +6,9 @@ from unittest.mock import patch
 from frappe.tests.utils import FrappeTestCase
 
 from igh_search.igh_search.ai_product_search import (
+    build_ai_display_filters,
+    build_ai_display_query,
+    build_default_filters,
     build_default_response,
     extract_deterministic_intent,
     parse_page_context,
@@ -101,6 +104,64 @@ class TestAIProductSearch(FrappeTestCase):
         self.assertEqual(intent["filters"]["rate_range"]["max"], 500.0)
         self.assertEqual(intent["intent_class"], "stock_priority")
 
+    def test_build_ai_display_filters_hides_default_and_derived_ranges(self):
+        filters = build_default_filters()
+        filters["color_temp"] = ["3000K"]
+        filters["ip_rate"] = ["IP65"]
+        filters["in_stock"] = True
+        filters["color_temp_kelvin_range"] = {"min": 2500, "max": 3500}
+        filters["rate_range"] = {"min": 50, "max": 1000000000}
+
+        display_filters = build_ai_display_filters(filters)
+        display_pairs = [(item["key"], item["value_display"]) for item in display_filters]
+
+        self.assertIn(("color_temp", "3000K"), display_pairs)
+        self.assertIn(("ip_rate", "IP65"), display_pairs)
+        self.assertIn(("in_stock", "Yes"), display_pairs)
+        self.assertIn(("rate_range", "Above 50 AED"), display_pairs)
+        self.assertNotIn(("color_temp_kelvin_range", "2500-3500 K"), display_pairs)
+
+    def test_build_ai_display_query_removes_structured_terms_generally(self):
+        filters = build_default_filters()
+        filters["color_temp"] = ["3000K"]
+        filters["ip_rate"] = ["IP65"]
+        filters["in_stock"] = True
+
+        query = build_ai_display_query(
+            "spotlights ip65 3000k in stock",
+            {"query": "spotlights in stock", "item_code_hint": ""},
+            filters,
+            "",
+        )
+
+        self.assertEqual(query, "spotlights")
+
+    def test_build_ai_display_query_removes_price_and_power_phrases(self):
+        filters = build_default_filters()
+        filters["color_temp"] = ["4000K"]
+        filters["rate_range"] = {"min": 50, "max": 1000000000}
+
+        query = build_ai_display_query(
+            "downlight above 50aed 4000k",
+            {"query": "downlight above 50aed 4000k", "item_code_hint": ""},
+            filters,
+            "",
+        )
+        self.assertEqual(query, "downlight")
+
+        power_filters = build_default_filters()
+        power_filters["color_temp"] = ["3000K"]
+        power_filters["power"] = ["10W"]
+        power_filters["power_value_range"] = {"min": 9, "max": 11}
+
+        query = build_ai_display_query(
+            "spotlights below 10w 3000k",
+            {"query": "spotlights below 10w 3000k", "item_code_hint": ""},
+            power_filters,
+            "",
+        )
+        self.assertEqual(query, "spotlights")
+
     @patch("igh_search.igh_search.ai_product_search.is_ai_product_search_enabled", return_value=False)
     def test_parse_product_search_intent_returns_safe_response_when_feature_disabled(self, _mock_enabled):
         response = parse_product_search_intent("warm white office panel lights")
@@ -112,9 +173,10 @@ class TestAIProductSearch(FrappeTestCase):
 
     @patch("igh_search.igh_search.ai_product_search.get_ai_search_vocabulary", return_value=VOCABULARY)
     @patch("igh_search.igh_search.ai_product_search.call_ai_for_product_search")
+    @patch("igh_search.igh_search.ai_product_search.needs_model_reasoning", return_value=True)
     @patch("igh_search.igh_search.ai_product_search.is_ai_product_search_enabled", return_value=True)
     def test_resolve_ai_search_intent_merges_llm_output(
-        self, _mock_enabled, mock_call_ai, _mock_vocab
+        self, _mock_enabled, _mock_needs_reasoning, mock_call_ai, _mock_vocab
     ):
         mock_call_ai.return_value = (
             "openai",
