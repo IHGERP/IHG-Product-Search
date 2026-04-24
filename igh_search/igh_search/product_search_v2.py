@@ -609,6 +609,7 @@ def search_products_v2(
     include_inactive=0,
     item_code_hint=None,
     feature_flag_override=0,
+    strict_sort=0,
 ):
     ensure_query_access(feature_flag_override=feature_flag_override)
 
@@ -617,7 +618,7 @@ def search_products_v2(
     query_resolution = resolve_effective_query(query=query, item_code_hint=item_code_hint)
     query_text = query_resolution["effective_query"]
     sku_like = query_resolution["sku_like"]
-    sort_resolution = resolve_sort_by(sort_by, sku_like=sku_like)
+    sort_resolution = resolve_sort_by(sort_by, sku_like=sku_like, strict_sort=strict_sort)
 
     search_parameters = {
         "q": query_text,
@@ -817,7 +818,7 @@ def rank_search_hits(hits, query_text):
     return sorted(hits, key=sort_key, reverse=True)
 
 
-def sanitize_sort_by(sort_by, sku_like=False):
+def sanitize_sort_by(sort_by, sku_like=False, strict_sort=False):
     value = cstr(sort_by or "").strip()
     if not value:
         return "_text_match:desc,in_stock:desc,business_score:desc"
@@ -827,10 +828,12 @@ def sanitize_sort_by(sort_by, sku_like=False):
     direction = parts[1] if len(parts) > 1 else "desc"
     if field_name not in SORT_FIELDS or direction not in {"asc", "desc"}:
         return "_text_match:desc,in_stock:desc,business_score:desc"
+    if cint(strict_sort):
+        return f"{field_name}:{direction},in_stock:desc,business_score:desc"
     return f"_text_match:desc,{field_name}:{direction},in_stock:desc"
 
 
-def resolve_sort_by(sort_by, sku_like=False):
+def resolve_sort_by(sort_by, sku_like=False, strict_sort=False):
     requested_sort = cstr(sort_by or "").strip()
     fallback_reasons = []
     aliased_sort = requested_sort
@@ -870,7 +873,9 @@ def resolve_sort_by(sort_by, sku_like=False):
     return {
         "requested_sort": requested_sort,
         "aliased_sort": aliased_sort,
-        "final_sort": sanitize_sort_by(aliased_sort, sku_like=sku_like),
+        "final_sort": sanitize_sort_by(
+            aliased_sort, sku_like=sku_like, strict_sort=strict_sort
+        ),
         "should_rerank": False,
         "fallback_reasons": fallback_reasons,
     }

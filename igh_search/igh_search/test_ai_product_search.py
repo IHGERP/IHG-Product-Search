@@ -7,30 +7,40 @@ from frappe.tests.utils import FrappeTestCase
 
 from igh_search.igh_search.ai_product_search import (
     build_default_response,
+    extract_deterministic_intent,
     parse_page_context,
     parse_product_search_intent,
+    preprocess_user_message,
+    resolve_ai_search_intent,
     sanitize_ai_product_search_response,
 )
 
 
-KNOWN_VALUES = {
-    "brand": ["LUMIBRIGHT", "ACME"],
-    "category_list": ["Outdoor Lighting", "Office Lighting"],
-    "product_type": ["Listed", "Unlisted", "Obsolete"],
-    "item_group": ["Outdoor Lighting", "Drivers"],
-    "ip_rate": ["IP65", "IP66"],
-    "power": ["6W", "12W"],
-    "color_temp_": ["3000K", "4000K"],
-    "body_finish": ["White", "Black"],
-    "input": ["220-240V"],
-    "mounting": ["Surface", "Recessed"],
-    "output_current": ["350mA"],
-    "output_voltage": ["24V"],
-    "lamp_type": ["LED"],
-    "lumen_output": ["345LM"],
-    "beam_angle": ["24D", "36D"],
-    "material": ["Aluminium"],
-    "warranty_": ["2 Years"],
+VOCABULARY = {
+    "known_values": {
+        "brand": ["LUMIBRIGHT", "ACME"],
+        "category_list": ["Outdoor Lighting", "Office Lighting", "Downlight"],
+        "product_type": ["Listed", "Unlisted", "Obsolete"],
+        "item_group": ["Outdoor Lighting", "Drivers", "Downlight"],
+        "ip_rate": ["IP65", "IP66"],
+        "power": ["6W", "12W", "50W"],
+        "color_temp": ["3000K", "4000K"],
+        "body_finish": ["White", "Black"],
+        "input_voltage": ["220-240V", "24V"],
+        "mounting": ["Surface", "Recessed"],
+        "output_current": ["350MA"],
+        "output_voltage": ["24V"],
+        "lamp_type": ["LED"],
+        "beam_angle": ["24D", "36D"],
+        "material": ["Aluminium"],
+        "warranty": ["2 Years"],
+        "variant_of": [],
+    },
+    "sort_values": [],
+    "field_aliases": {},
+    "sort_aliases": {},
+    "glossary_entries": [],
+    "alias_map": {},
 }
 
 
@@ -50,10 +60,10 @@ class TestAIProductSearch(FrappeTestCase):
             },
         )
 
-    def test_sanitize_response_keeps_only_supported_values(self):
+    def test_sanitize_response_maps_legacy_keys_to_v2_contract(self):
         ai_response = {
-            "query": "waterproof outdoor lights",
-            "sort_by": "inventory_value:desc",
+            "query": "waterproof lights",
+            "sort_by": "creation_on:desc",
             "filters": {
                 "item_group": ["Outdoor Lighting", "Imaginary Group"],
                 "brand": ["LUMIBRIGHT", 99],
@@ -61,38 +71,35 @@ class TestAIProductSearch(FrappeTestCase):
                 "price_range": {"min": 100, "max": 5000},
                 "stock_range": {"min": "20", "max": "100"},
                 "in_stock": "true",
-                "show_promotion": "no",
-                "unsupported": ["value"],
+                "color_temp_": ["3000K"],
+                "input": ["24V"],
+                "warranty_": ["2 Years"],
             },
             "explanation": "Mapped request safely.",
         }
 
-        sanitized = sanitize_ai_product_search_response(ai_response, KNOWN_VALUES)
+        sanitized = sanitize_ai_product_search_response(ai_response, VOCABULARY)
 
-        self.assertEqual(sanitized["sort_by"], "inventory_value:desc")
+        self.assertEqual(sanitized["sort_by"], "creation:desc")
         self.assertEqual(sanitized["filters"]["item_group"], ["Outdoor Lighting"])
         self.assertEqual(sanitized["filters"]["brand"], ["LUMIBRIGHT"])
         self.assertEqual(sanitized["filters"]["ip_rate"], ["IP65"])
-        self.assertEqual(sanitized["filters"]["price_range"], {"min": 100.0, "max": 5000.0})
+        self.assertEqual(sanitized["filters"]["rate_range"], {"min": 100.0, "max": 5000.0})
         self.assertEqual(sanitized["filters"]["stock_range"], {"min": 20.0, "max": 100.0})
+        self.assertEqual(sanitized["filters"]["color_temp"], ["3000K"])
+        self.assertEqual(sanitized["filters"]["input_voltage"], ["24V"])
+        self.assertEqual(sanitized["filters"]["warranty"], ["2 Years"])
         self.assertTrue(sanitized["filters"]["in_stock"])
-        self.assertFalse(sanitized["filters"]["show_promotion"])
 
-    def test_sanitize_response_resets_invalid_sort_and_ranges(self):
-        ai_response = {
-            "query": "drivers",
-            "sort_by": "totally_invalid",
-            "filters": {
-                "stock_range": {"min": "bad", "max": None},
-                "price_range": {"min": 9000, "max": 1000},
-            },
-        }
+    def test_extract_deterministic_intent_handles_specs_and_stock_sort(self):
+        preprocessed = preprocess_user_message("ip65 3000k downlight stock high to low under 500")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
 
-        sanitized = sanitize_ai_product_search_response(ai_response, KNOWN_VALUES)
-
-        self.assertEqual(sanitized["sort_by"], "")
-        self.assertEqual(sanitized["filters"]["stock_range"], {"min": 0, "max": 1000000000})
-        self.assertEqual(sanitized["filters"]["price_range"], {"min": 1000.0, "max": 9000.0})
+        self.assertEqual(intent["sort_by"], "stock:desc")
+        self.assertIn("IP65", intent["filters"]["ip_rate"])
+        self.assertIn("3000K", intent["filters"]["color_temp"])
+        self.assertEqual(intent["filters"]["rate_range"]["max"], 500.0)
+        self.assertEqual(intent["intent_class"], "stock_priority")
 
     @patch("igh_search.igh_search.ai_product_search.is_ai_product_search_enabled", return_value=False)
     def test_parse_product_search_intent_returns_safe_response_when_feature_disabled(self, _mock_enabled):
@@ -103,42 +110,46 @@ class TestAIProductSearch(FrappeTestCase):
         self.assertEqual(response["filters"], build_default_response()["filters"])
         self.assertIn("disabled", response["explanation"].lower())
 
-    @patch("igh_search.igh_search.ai_product_search.get_known_filter_values", return_value=KNOWN_VALUES)
-    @patch("igh_search.igh_search.ai_product_search.call_openai_for_product_search")
+    @patch("igh_search.igh_search.ai_product_search.get_ai_search_vocabulary", return_value=VOCABULARY)
+    @patch("igh_search.igh_search.ai_product_search.call_ai_for_product_search")
     @patch("igh_search.igh_search.ai_product_search.is_ai_product_search_enabled", return_value=True)
-    def test_parse_product_search_intent_sanitizes_ai_output(self, _mock_enabled, mock_openai, _mock_known_values):
-        mock_openai.return_value = (
-            '{"query":"drivers","sort_by":"inventory_value:desc","filters":{"brand":["ACME"],"stock_range":{"min":10,"max":100}}}',
+    def test_resolve_ai_search_intent_merges_llm_output(
+        self, _mock_enabled, mock_call_ai, _mock_vocab
+    ):
+        mock_call_ai.return_value = (
+            "openai",
+            '{"query":"downlight","sort_by":"","filters":{"brand":["ACME"],"mounting":["Surface"]}}',
             {
-                "query": "drivers",
-                "sort_by": "inventory_value:desc",
-                "filters": {"brand": ["ACME"], "stock_range": {"min": 10, "max": 100}},
+                "query": "downlight",
+                "sort_by": "",
+                "filters": {"brand": ["ACME"], "mounting": ["Surface"]},
             },
         )
 
-        response = parse_product_search_intent(
-            "drivers with high stock",
+        response = resolve_ai_search_intent(
+            "need surface downlight from acme",
             {"route": "/list", "search": ""},
         )
 
-        self.assertEqual(response["query"], "drivers")
-        self.assertEqual(response["sort_by"], "inventory_value:desc")
+        self.assertEqual(response["query"], "downlight")
         self.assertEqual(response["filters"]["brand"], ["ACME"])
-        self.assertEqual(response["filters"]["stock_range"], {"min": 10.0, "max": 100.0})
-        self.assertTrue(response["explanation"])
+        self.assertEqual(response["filters"]["mounting"], ["Surface"])
+        self.assertTrue(response["resolved_intent"]["llm_used"])
+        self.assertEqual(response["resolved_intent"]["provider"], "openai")
 
-    @patch("igh_search.igh_search.ai_product_search.get_known_filter_values", return_value=KNOWN_VALUES)
-    @patch("igh_search.igh_search.ai_product_search.call_openai_for_product_search", side_effect=Exception("boom"))
+    @patch("igh_search.igh_search.ai_product_search.get_ai_search_vocabulary", return_value=VOCABULARY)
+    @patch("igh_search.igh_search.ai_product_search.call_ai_for_product_search", side_effect=Exception("boom"))
     @patch("igh_search.igh_search.ai_product_search.is_ai_product_search_enabled", return_value=True)
-    def test_parse_product_search_intent_falls_back_safely_on_ai_failure(
+    def test_resolve_ai_search_intent_falls_back_to_deterministic_on_ai_failure(
         self,
         _mock_enabled,
-        _mock_openai,
-        _mock_known_values,
+        _mock_call_ai,
+        _mock_vocab,
     ):
-        response = parse_product_search_intent("highest value industrial lighting products")
+        response = resolve_ai_search_intent("DL-100 ip65 3000k", {"route": "/list"})
 
-        self.assertEqual(response["query"], "")
-        self.assertEqual(response["sort_by"], "")
-        self.assertEqual(response["filters"], build_default_response()["filters"])
-        self.assertIn("failed", response["explanation"].lower())
+        self.assertEqual(response["item_code_hint"], "DL-100")
+        self.assertIn("IP65", response["filters"]["ip_rate"])
+        self.assertFalse(response["resolved_intent"]["llm_used"])
+        self.assertEqual(response["resolved_intent"]["provider"], "deterministic")
+

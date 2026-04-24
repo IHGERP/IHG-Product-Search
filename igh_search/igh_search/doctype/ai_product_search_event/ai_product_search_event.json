@@ -1,0 +1,199 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "AIQEV-.#####",
+ "creation": "2026-04-23 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "details_section",
+  "event_type",
+  "search_event_reference",
+  "raw_message",
+  "normalized_query",
+  "selected_item_code",
+  "related_item_code",
+  "provider",
+  "llm_used",
+  "applied_sort",
+  "result_count",
+  "latency_ms",
+  "route",
+  "session_id",
+  "user_id",
+  "user_roles",
+  "resolved_intent_json",
+  "deterministic_signals_json",
+  "applied_filters_json",
+  "applied_relaxations_json",
+  "quality_signals_json",
+  "top_item_codes_json",
+  "page_context_json",
+  "benchmark_case_name",
+  "outcome_status",
+  "reformulated_from"
+ ],
+ "fields": [
+  {
+   "fieldname": "details_section",
+   "fieldtype": "Section Break",
+   "label": "Details"
+  },
+  {
+   "fieldname": "event_type",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Event Type",
+   "options": "\nsearch_issued\nsearch_click\nshortlist\nquotation_created\nreformulated_query\nbenchmark_run"
+  },
+  {
+   "fieldname": "search_event_reference",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Search Event Reference"
+  },
+  {
+   "fieldname": "raw_message",
+   "fieldtype": "Long Text",
+   "label": "Raw Message"
+  },
+  {
+   "fieldname": "normalized_query",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Normalized Query"
+  },
+  {
+   "fieldname": "selected_item_code",
+   "fieldtype": "Data",
+   "label": "Selected Item Code"
+  },
+  {
+   "fieldname": "related_item_code",
+   "fieldtype": "Data",
+   "label": "Related Item Code"
+  },
+  {
+   "fieldname": "provider",
+   "fieldtype": "Data",
+   "label": "Provider"
+  },
+  {
+   "default": "0",
+   "fieldname": "llm_used",
+   "fieldtype": "Check",
+   "label": "LLM Used"
+  },
+  {
+   "fieldname": "applied_sort",
+   "fieldtype": "Data",
+   "label": "Applied Sort"
+  },
+  {
+   "fieldname": "result_count",
+   "fieldtype": "Int",
+   "label": "Result Count"
+  },
+  {
+   "fieldname": "latency_ms",
+   "fieldtype": "Float",
+   "label": "Latency (ms)"
+  },
+  {
+   "fieldname": "route",
+   "fieldtype": "Data",
+   "label": "Route"
+  },
+  {
+   "fieldname": "session_id",
+   "fieldtype": "Data",
+   "label": "Session ID"
+  },
+  {
+   "fieldname": "user_id",
+   "fieldtype": "Data",
+   "label": "User ID"
+  },
+  {
+   "fieldname": "user_roles",
+   "fieldtype": "Long Text",
+   "label": "User Roles"
+  },
+  {
+   "fieldname": "resolved_intent_json",
+   "fieldtype": "Long Text",
+   "label": "Resolved Intent JSON"
+  },
+  {
+   "fieldname": "deterministic_signals_json",
+   "fieldtype": "Long Text",
+   "label": "Deterministic Signals JSON"
+  },
+  {
+   "fieldname": "applied_filters_json",
+   "fieldtype": "Long Text",
+   "label": "Applied Filters JSON"
+  },
+  {
+   "fieldname": "applied_relaxations_json",
+   "fieldtype": "Long Text",
+   "label": "Applied Relaxations JSON"
+  },
+  {
+   "fieldname": "quality_signals_json",
+   "fieldtype": "Long Text",
+   "label": "Quality Signals JSON"
+  },
+  {
+   "fieldname": "top_item_codes_json",
+   "fieldtype": "Long Text",
+   "label": "Top Item Codes JSON"
+  },
+  {
+   "fieldname": "page_context_json",
+   "fieldtype": "Long Text",
+   "label": "Page Context JSON"
+  },
+  {
+   "fieldname": "benchmark_case_name",
+   "fieldtype": "Data",
+   "label": "Benchmark Case Name"
+  },
+  {
+   "fieldname": "outcome_status",
+   "fieldtype": "Data",
+   "label": "Outcome Status"
+  },
+  {
+   "fieldname": "reformulated_from",
+   "fieldtype": "Data",
+   "label": "Reformulated From"
+  }
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-04-23 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "IGH Search",
+ "name": "AI Product Search Event",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

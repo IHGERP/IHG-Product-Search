@@ -230,6 +230,109 @@ def ai_product_search(message=None, page_context=None):
 
 
 @frappe.whitelist()
+@rate_limit(limit=_get_ai_product_search_rate_limit, seconds=60, methods="POST")
+def ai_search_products_v2(
+    message=None,
+    page_context=None,
+    page=1,
+    page_length=20,
+    include_inactive=0,
+    feature_flag_override=0,
+):
+    if getattr(frappe.local, "request", None) and frappe.local.request.method not in ("POST", "GET"):
+        frappe.throw("AI V2 product search only supports GET and POST requests.")
+
+    from igh_search.igh_search.ai_product_search import ai_search_products_v2 as ai_search_products_v2_impl
+
+    return ai_search_products_v2_impl(
+        message=message,
+        page_context=page_context,
+        page=page,
+        page_length=page_length,
+        include_inactive=include_inactive,
+        feature_flag_override=feature_flag_override,
+    )
+
+
+@frappe.whitelist()
+def get_ai_product_search_quality_report():
+    if "System Manager" not in frappe.get_roles():
+        frappe.throw("Only System Manager can view AI product search quality.")
+
+    from igh_search.igh_search.ai_product_search import get_ai_search_quality_report
+
+    return get_ai_search_quality_report()
+
+
+@frappe.whitelist()
+def track_ai_search_click(search_event_id, item_code):
+    if frappe.session.user == "Guest":
+        frappe.throw("Authentication required")
+
+    from igh_search.igh_search.ai_product_search import track_ai_search_outcome
+
+    return track_ai_search_outcome(
+        "search_click",
+        search_event_id=search_event_id,
+        item_code=item_code,
+    )
+
+
+@frappe.whitelist()
+def track_ai_search_shortlist(search_event_id, item_code):
+    if frappe.session.user == "Guest":
+        frappe.throw("Authentication required")
+
+    from igh_search.igh_search.ai_product_search import track_ai_search_outcome
+
+    return track_ai_search_outcome(
+        "shortlist",
+        search_event_id=search_event_id,
+        item_code=item_code,
+    )
+
+
+@frappe.whitelist()
+def track_ai_search_quotation(search_event_id, item_code, quotation=None):
+    if frappe.session.user == "Guest":
+        frappe.throw("Authentication required")
+
+    from igh_search.igh_search.ai_product_search import track_ai_search_outcome
+
+    return track_ai_search_outcome(
+        "quotation_created",
+        search_event_id=search_event_id,
+        item_code=item_code,
+        related_item_code=quotation,
+    )
+
+
+@frappe.whitelist()
+def track_ai_search_reformulation(search_event_id, reformulated_message, page_context=None):
+    if frappe.session.user == "Guest":
+        frappe.throw("Authentication required")
+
+    from igh_search.igh_search.ai_product_search import track_ai_search_outcome
+
+    return track_ai_search_outcome(
+        "reformulated_query",
+        search_event_id=search_event_id,
+        reformulated_message=reformulated_message,
+        page_context=page_context,
+    )
+
+
+@frappe.whitelist()
+def evaluate_ai_product_search_benchmark(feature_flag_override=0):
+    if "System Manager" not in frappe.get_roles():
+        frappe.throw("Only System Manager can run AI search benchmark.")
+
+    from igh_search.igh_search.ai_product_search import evaluate_ai_search_benchmark
+
+    return evaluate_ai_search_benchmark(feature_flag_override=feature_flag_override)
+
+
+@frappe.whitelist()
 def search_products_v2(
     query=None,
     filters=None,

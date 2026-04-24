@@ -157,6 +157,14 @@ class TestProductSearchV2(FrappeTestCase):
         )
         self.assertFalse(sort_resolution["should_rerank"])
 
+    def test_resolve_sort_by_supports_strict_sort_for_ai(self):
+        sort_resolution = resolve_sort_by("stock:desc", strict_sort=1)
+        self.assertEqual(
+            sort_resolution["final_sort"],
+            "stock:desc,in_stock:desc,business_score:desc",
+        )
+        self.assertFalse(sort_resolution["should_rerank"])
+
     def test_resolve_sort_by_falls_back_for_unknown_sort(self):
         sort_resolution = resolve_sort_by("unknown_field:desc")
         self.assertEqual(
@@ -186,6 +194,25 @@ class TestProductSearchV2(FrappeTestCase):
 
         rank_search_hits_mock.assert_not_called()
         self.assertEqual(response["query_debug"]["applied_sort"], "_text_match:desc,rate:asc,in_stock:desc")
+
+    @patch("igh_search.igh_search.product_search_v2.ensure_query_access")
+    @patch("igh_search.igh_search.product_search_v2.create_typesense_client")
+    @patch("igh_search.igh_search.product_search_v2.rank_search_hits")
+    def test_search_products_v2_uses_strict_sort_for_ai_requests(
+        self, rank_search_hits_mock, create_client_mock, _ensure_query_access_mock
+    ):
+        fake_client = self._make_fake_client(
+            {"hits": [{"document": {"item_code": "ITEM-001"}}], "found": 1, "facet_counts": []}
+        )
+        create_client_mock.return_value = fake_client
+
+        response = search_products_v2(query="downlight", sort_by="stock:desc", strict_sort=1)
+
+        rank_search_hits_mock.assert_not_called()
+        self.assertEqual(
+            response["query_debug"]["applied_sort"],
+            "stock:desc,in_stock:desc,business_score:desc",
+        )
 
     @patch("igh_search.igh_search.product_search_v2.ensure_query_access")
     @patch("igh_search.igh_search.product_search_v2.create_typesense_client")

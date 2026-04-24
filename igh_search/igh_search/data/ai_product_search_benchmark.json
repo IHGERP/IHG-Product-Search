@@ -1,0 +1,46 @@
+{
+ "cases": [
+  {
+   "name": "sku_lookup_exact",
+   "message": "DL-100",
+   "page_context": {"route": "/list"},
+   "expected_intent_class": "sku_lookup",
+   "expected_sort_by": ""
+  },
+  {
+   "name": "spec_query_ip_cct",
+   "message": "ip65 3000k downlight",
+   "page_context": {"route": "/list"},
+   "expected_intent_class": "spec_match",
+   "expected_sort_by": ""
+  },
+  {
+   "name": "stock_priority_query",
+   "message": "high stock surface lights under 500",
+   "page_context": {"route": "/list"},
+   "expected_intent_class": "stock_priority",
+   "expected_sort_by": "stock:desc"
+  },
+  {
+   "name": "discount_priority_query",
+   "message": "highest discount downlights",
+   "page_context": {"route": "/list"},
+   "expected_intent_class": "discount_priority",
+   "expected_sort_by": "discount_percentage:desc"
+  },
+  {
+   "name": "recent_products_query",
+   "message": "latest office panel lights",
+   "page_context": {"route": "/list"},
+   "expected_intent_class": "recent_products",
+   "expected_sort_by": "creation:desc"
+  },
+  {
+   "name": "alternatives_query",
+   "message": "alternative for black pendant 2700k",
+   "page_context": {"route": "/list"},
+   "expected_intent_class": "alternatives",
+   "expected_sort_by": ""
+  }
+ ]
+}
