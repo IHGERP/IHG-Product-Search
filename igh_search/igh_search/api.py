@@ -342,6 +342,7 @@ def search_products_v2(
     include_inactive=0,
     item_code_hint=None,
     feature_flag_override=0,
+    strict_sort=0,
 ):
     return search_products_v2_impl(
         query=query,
@@ -352,6 +353,7 @@ def search_products_v2(
         include_inactive=include_inactive,
         item_code_hint=item_code_hint,
         feature_flag_override=feature_flag_override,
+        strict_sort=strict_sort,
     )
 
 

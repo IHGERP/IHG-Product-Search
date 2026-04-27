@@ -156,6 +156,12 @@ RANGE_QUERY_PATTERNS = {
         r"\b(?:under|below|less than|over|above|more than|between)\s*\d+(?:\.\d+)?\s*w\b(?:\s*(?:and|to)\s*\d+(?:\.\d+)?\s*w)?",
         r"\b\d+(?:\.\d+)?\s*w\b",
     ),
+    "stock_range": (
+        r"\bstock\s+(?:under|below|less than|over|above|more than)\s*\d+(?:\.\d+)?(?:\s*(?:qty|quantity))?\b",
+        r"\b(?:under|below|less than|over|above|more than)\s*\d+(?:\.\d+)?\s*(?:qty|quantity)\b",
+        r"\bstock\s+between\s*\d+(?:\.\d+)?(?:\s*(?:qty|quantity))?\s*(?:and|to)\s*\d+(?:\.\d+)?(?:\s*(?:qty|quantity))?\b",
+        r"\bbetween\s*\d+(?:\.\d+)?\s*(?:qty|quantity)\s*(?:and|to)\s*\d+(?:\.\d+)?(?:\s*(?:qty|quantity))?\b",
+    ),
     "color_temp_kelvin_range": (r"\b\d{4,5}\s*k\b",),
     "ip_rating_numeric_range": (r"\bip\s*\d{2,3}\b",),
 }
@@ -890,7 +896,7 @@ def _extract_sku_hint(normalized_message):
             continue
         if re.match(r"^ip\d{2,3}$", normalized_candidate):
             continue
-        if re.match(r"^\d+(?:k|w|v|ma|a|d)$", normalized_candidate):
+        if re.match(r"^\d+(?:k|w|v|ma|a|d|aed|qty)$", normalized_candidate):
             continue
         if re.match(r"^\d{4,5}k$", normalized_candidate):
             continue
@@ -1011,6 +1017,60 @@ def _match_known_values(normalized_message, known_values):
     return matches
 
 
+def _extract_comparative_range(normalized_message, range_key):
+    between_patterns = {
+        "rate_range": (
+            r"\bbetween\s*(?:aed\s*)?(\d+(?:\.\d+)?)\s*(?:aed\s*)?(?:and|to)\s*(?:aed\s*)?(\d+(?:\.\d+)?)(?:\s*aed)\b",
+            r"\bprice\s+between\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\b",
+        ),
+        "power_value_range": (
+            r"\bbetween\s*(\d+(?:\.\d+)?)\s*w?\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s*w\b",
+            r"\bpower\s+between\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\b",
+        ),
+        "stock_range": (
+            r"\bstock\s+between\s*(\d+(?:\.\d+)?)(?:\s*(?:qty|quantity))?\s*(?:and|to)\s*(\d+(?:\.\d+)?)(?:\s*(?:qty|quantity))?\b",
+            r"\bbetween\s*(\d+(?:\.\d+)?)\s*(?:qty|quantity)\s*(?:and|to)\s*(\d+(?:\.\d+)?)(?:\s*(?:qty|quantity))?\b",
+        ),
+    }
+    single_patterns = {
+        "rate_range": (
+            r"\b(under|below|less than|over|above|more than)\s*(?:aed\s*)?(\d+(?:\.\d+)?)(?:\s*aed)\b",
+            r"\bprice\s+(under|below|less than|over|above|more than)\s*(\d+(?:\.\d+)?)\b",
+            r"(?<!stock )\b(under|below|less than|over|above|more than)\s*(\d+(?:\.\d+)?)(?!\s*(?:w|qty|quantity|k|v|ma)\b)\b",
+        ),
+        "power_value_range": (
+            r"\b(under|below|less than|over|above|more than)\s*(\d+(?:\.\d+)?)\s*w\b",
+            r"\bpower\s+(under|below|less than|over|above|more than)\s*(\d+(?:\.\d+)?)\b",
+        ),
+        "stock_range": (
+            r"\bstock\s+(under|below|less than|over|above|more than)\s*(\d+(?:\.\d+)?)(?:\s*(?:qty|quantity))?\b",
+            r"\b(under|below|less than|over|above|more than)\s*(\d+(?:\.\d+)?)\s*(?:qty|quantity)\b",
+        ),
+    }
+
+    for pattern in between_patterns.get(range_key, ()):
+        match = re.search(pattern, normalized_message)
+        if match:
+            return {
+                "min": match.group(1),
+                "max": match.group(2),
+                "phrase": match.group(0),
+            }
+
+    for pattern in single_patterns.get(range_key, ()):
+        match = re.search(pattern, normalized_message)
+        if not match:
+            continue
+        operator = cstr(match.group(1)).strip().lower()
+        value = match.group(2)
+        if operator in {"under", "below", "less than"}:
+            return {"min": None, "max": value, "phrase": match.group(0)}
+        if operator in {"over", "above", "more than"}:
+            return {"min": value, "max": None, "phrase": match.group(0)}
+
+    return None
+
+
 def extract_deterministic_intent(preprocessed_message, vocabulary):
     intent = _build_intent_state()
     normalized_message = preprocessed_message["normalized_message"]
@@ -1047,19 +1107,33 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
                 hard=True,
             )
 
-    power_match = re.search(r"\b(\d+(?:\.\d+)?)\s*w\b", normalized_message)
-    if power_match:
-        power_value = flt(power_match.group(1))
-        _add_filter_value(intent, "power", f"{power_match.group(1)}W", "regex", confidence=1.0, hard=True)
-        _set_range(
-            intent,
-            "power_value_range",
-            power_value * 0.9,
-            power_value * 1.1,
-            source="regex",
-            confidence=1.0,
-            hard=True,
-        )
+    for range_key in ("power_value_range", "stock_range", "rate_range"):
+        comparative_range = _extract_comparative_range(normalized_message, range_key)
+        if comparative_range:
+            _set_range(
+                intent,
+                range_key,
+                comparative_range.get("min"),
+                comparative_range.get("max"),
+                source="regex",
+                confidence=1.0,
+                hard=True,
+            )
+
+    if _is_default_range_value("power_value_range", intent["filters"].get("power_value_range")):
+        power_match = re.search(r"\b(\d+(?:\.\d+)?)\s*w\b", normalized_message)
+        if power_match:
+            power_value = flt(power_match.group(1))
+            _add_filter_value(intent, "power", f"{power_match.group(1)}W", "regex", confidence=1.0, hard=True)
+            _set_range(
+                intent,
+                "power_value_range",
+                power_value * 0.9,
+                power_value * 1.1,
+                source="regex",
+                confidence=1.0,
+                hard=True,
+            )
 
     for voltage in _extract_voltage_values(normalized_message):
         _add_filter_value(intent, "input_voltage", voltage.upper().replace(" ", ""), "regex", confidence=0.95, hard=True)
@@ -1094,19 +1168,6 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
     elif any(phrase in normalized_message for phrase in ("highest price", "most expensive", "price high to low")):
         _set_sort(intent, "rate:desc", "phrase", confidence=1.0)
 
-    under_match = re.search(r"\b(?:under|below|less than)\s*(aed\s*)?(\d+(?:\.\d+)?)\b", normalized_message)
-    over_match = re.search(r"\b(?:over|above|more than)\s*(aed\s*)?(\d+(?:\.\d+)?)\b", normalized_message)
-    between_match = re.search(
-        r"\bbetween\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\b",
-        normalized_message,
-    )
-    if between_match:
-        _set_range(intent, "rate_range", between_match.group(1), between_match.group(2), source="regex", confidence=1.0, hard=True)
-    elif under_match:
-        _set_range(intent, "rate_range", None, under_match.group(2), source="regex", confidence=1.0, hard=True)
-    elif over_match:
-        _set_range(intent, "rate_range", over_match.group(2), None, source="regex", confidence=1.0, hard=True)
-
     _extract_additional_specs(intent, preprocessed_message)
 
     matched_values = _match_known_values(expanded_message, known_lookup)
@@ -1123,9 +1184,14 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
     if page_context.get("search") and not intent["query"]:
         _set_query(intent, page_context["search"], "page_context")
 
-    query_candidate = preprocessed_message["message"]
+    query_candidate = normalized_message
+    for range_key, patterns in RANGE_QUERY_PATTERNS.items():
+        if _is_default_range_value(range_key, intent["filters"].get(range_key)):
+            continue
+        for pattern in patterns:
+            query_candidate = re.sub(pattern, " ", query_candidate)
     for value in re.findall(r"\b(?:ip\s*\d+|\d+(?:\.\d+)?\s*w|\d{4,5}\s*k)\b", normalized_message):
-        query_candidate = re.sub(re.escape(value), " ", query_candidate, flags=re.IGNORECASE)
+        query_candidate = re.sub(re.escape(value), " ", query_candidate)
     query_candidate = re.sub(r"\s+", " ", query_candidate).strip()
     if intent["intent_class"] != "sku_lookup" and query_candidate:
         _set_query(intent, query_candidate, "message")

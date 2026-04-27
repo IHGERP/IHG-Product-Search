@@ -162,6 +162,74 @@ class TestAIProductSearch(FrappeTestCase):
         )
         self.assertEqual(query, "spotlights")
 
+    def test_extract_deterministic_intent_parses_comparative_power_as_range(self):
+        preprocessed = preprocess_user_message("downlights 3000k below 20w")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+
+        self.assertEqual(intent["filters"]["power"], [])
+        self.assertEqual(intent["filters"]["power_value_range"]["max"], 20.0)
+        self.assertEqual(intent["filters"]["power_value_range"]["min"], 0)
+        self.assertIn("3000K", intent["filters"]["color_temp"])
+        self.assertEqual(intent["query"], "downlights")
+
+    def test_extract_deterministic_intent_keeps_exact_power_without_comparator(self):
+        preprocessed = preprocess_user_message("20w downlight")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+
+        self.assertEqual(intent["filters"]["power"], ["20W"])
+        self.assertEqual(intent["filters"]["power_value_range"]["min"], 18.0)
+        self.assertEqual(intent["filters"]["power_value_range"]["max"], 22.0)
+
+    def test_extract_deterministic_intent_parses_price_comparatives(self):
+        preprocessed = preprocess_user_message("strip lights between 20 and 50 aed")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+        self.assertEqual(intent["filters"]["rate_range"], {"min": 20.0, "max": 50.0})
+        self.assertEqual(intent["query"], "strip lights")
+
+        preprocessed = preprocess_user_message("spotlights above 100aed")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+        self.assertEqual(intent["filters"]["rate_range"]["min"], 100.0)
+        self.assertEqual(intent["filters"]["rate_range"]["max"], 1000000000)
+        self.assertEqual(intent["query"], "spotlights")
+
+    def test_extract_deterministic_intent_parses_stock_comparatives(self):
+        preprocessed = preprocess_user_message("drivers stock above 10 qty")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+        self.assertEqual(intent["filters"]["stock_range"]["min"], 10.0)
+        self.assertEqual(intent["filters"]["stock_range"]["max"], 1000000000)
+        self.assertEqual(intent["query"], "drivers")
+
+        preprocessed = preprocess_user_message("drivers stock below 10 qty")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+        self.assertEqual(intent["filters"]["stock_range"]["min"], 0)
+        self.assertEqual(intent["filters"]["stock_range"]["max"], 10.0)
+        self.assertEqual(intent["query"], "drivers")
+
+    def test_extract_deterministic_intent_does_not_misclassify_ambiguous_between(self):
+        preprocessed = preprocess_user_message("between 20 and 50 downlight")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+
+        self.assertEqual(
+            intent["filters"]["rate_range"],
+            build_default_filters()["rate_range"],
+        )
+        self.assertEqual(
+            intent["filters"]["power_value_range"],
+            build_default_filters()["power_value_range"],
+        )
+
+    def test_build_ai_display_filters_formats_comparative_ranges(self):
+        filters = build_default_filters()
+        filters["power_value_range"] = {"min": 0, "max": 20}
+        filters["stock_range"] = {"min": 10, "max": 1000000000}
+        filters["rate_range"] = {"min": 20, "max": 50}
+
+        display_pairs = [(item["key"], item["value_display"]) for item in build_ai_display_filters(filters)]
+
+        self.assertIn(("power_value_range", "Below 20 W"), display_pairs)
+        self.assertIn(("stock_range", "Above 10"), display_pairs)
+        self.assertIn(("rate_range", "20-50 AED"), display_pairs)
+
     @patch("igh_search.igh_search.ai_product_search.is_ai_product_search_enabled", return_value=False)
     def test_parse_product_search_intent_returns_safe_response_when_feature_disabled(self, _mock_enabled):
         response = parse_product_search_intent("warm white office panel lights")
@@ -214,4 +282,3 @@ class TestAIProductSearch(FrappeTestCase):
         self.assertIn("IP65", response["filters"]["ip_rate"])
         self.assertFalse(response["resolved_intent"]["llm_used"])
         self.assertEqual(response["resolved_intent"]["provider"], "deterministic")
-

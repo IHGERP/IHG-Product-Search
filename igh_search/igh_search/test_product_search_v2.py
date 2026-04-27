@@ -145,7 +145,7 @@ class TestProductSearchV2(FrappeTestCase):
         self.assertEqual(sort_resolution["aliased_sort"], "creation_ts:desc")
         self.assertEqual(
             sort_resolution["final_sort"],
-            "_text_match:desc,creation_ts:desc,in_stock:desc",
+            "creation_ts:desc,in_stock:desc,business_score:desc",
         )
         self.assertFalse(sort_resolution["should_rerank"])
 
@@ -153,7 +153,7 @@ class TestProductSearchV2(FrappeTestCase):
         sort_resolution = resolve_sort_by("discount_percentage:desc")
         self.assertEqual(
             sort_resolution["final_sort"],
-            "_text_match:desc,discount_percentage:desc,in_stock:desc",
+            "discount_percentage:desc,in_stock:desc,business_score:desc",
         )
         self.assertFalse(sort_resolution["should_rerank"])
 
@@ -193,7 +193,14 @@ class TestProductSearchV2(FrappeTestCase):
         response = search_products_v2(query="downlight", sort_by="rate:asc")
 
         rank_search_hits_mock.assert_not_called()
-        self.assertEqual(response["query_debug"]["applied_sort"], "_text_match:desc,rate:asc,in_stock:desc")
+        self.assertEqual(response["query_debug"]["applied_sort"], "rate:asc,in_stock:desc,business_score:desc")
+
+    def test_explicit_stock_sort_uses_field_first_precedence(self):
+        sort_resolution = resolve_sort_by("stock:desc")
+        self.assertEqual(
+            sort_resolution["final_sort"],
+            "stock:desc,in_stock:desc,business_score:desc",
+        )
 
     @patch("igh_search.igh_search.product_search_v2.ensure_query_access")
     @patch("igh_search.igh_search.product_search_v2.create_typesense_client")
