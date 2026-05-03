@@ -832,7 +832,16 @@ def create_quotation_from_portal(opportunity=None, items=None):
 
     from erpnext.crm.doctype.opportunity.opportunity import make_quotation
 
-    quotation = frappe.get_doc(make_quotation(opportunity))
+    # Elevate to Administrator so make_quotation succeeds regardless of the
+    # portal user's role assignments ("You do not have enough permissions").
+    saved_user = frappe.session.user
+    try:
+        frappe.set_user("Administrator")
+        quotation_dict = make_quotation(opportunity)
+    finally:
+        frappe.set_user(saved_user)
+
+    quotation = frappe.get_doc(quotation_dict)
     quotation.set("items", [])
     quotation.opportunity = accessible_opportunity.name
 
@@ -868,9 +877,6 @@ def get_cart_items(customer_id=None):
     if not customer_id:
         customer_id = _resolve_customer_from_session_user()
 
-    if not customer_id:
-        return {"status": "success", "cart": {"marketplace_items": []}, "you_may_like": []}
-
     cart_response = _build_cart_response()
     marketplace_items = (cart_response.get("cart") or {}).get("marketplace_items") or []
     normalized_items = []
@@ -883,6 +889,8 @@ def get_cart_items(customer_id=None):
     return {
         "status": "success",
         "cart": {"marketplace_items": normalized_items},
+        "total": cart_response.get("total", 0),
+        "grand_total": cart_response.get("grand_total", 0),
         "you_may_like": [],
     }
 

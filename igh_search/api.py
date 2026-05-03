@@ -76,3 +76,8 @@ def move_all_tocart(*args, **kwargs):
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def clear_cartitem(*args, **kwargs):
     return _impl().clear_cartitem(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(methods=["POST"])
+def clear_cart(*args, **kwargs):
+    return _impl().clear_cart(*args, **_sanitize_framework_kwargs(kwargs))
