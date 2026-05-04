@@ -81,3 +81,8 @@ def clear_cartitem(*args, **kwargs):
 @frappe.whitelist(methods=["POST"])
 def clear_cart(*args, **kwargs):
     return _impl().clear_cart(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(methods=["POST"])
+def get_recent_quotations(*args, **kwargs):
+    return _impl().get_recent_quotations(*args, **_sanitize_framework_kwargs(kwargs))

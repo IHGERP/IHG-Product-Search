@@ -933,6 +933,19 @@ def clear_cart():
     return {"status": "success", "data": []}
 
 
+@frappe.whitelist(methods=["POST"])
+def get_recent_quotations():
+    _ensure_authenticated_user()
+    quotations = frappe.get_all(
+        "Quotation",
+        filters={"owner": frappe.session.user, "docstatus": ["!=", 2]},
+        fields=["name", "customer_name", "opportunity", "status", "grand_total", "creation"],
+        order_by="creation desc",
+        limit=20,
+    )
+    return {"status": "success", "data": quotations}
+
+
 @frappe.whitelist(allow_guest=True, methods=["POST"])
 def update_cartitem(item_code=None, qty=None):
     _log_cart_mutation_request("update_cartitem")
