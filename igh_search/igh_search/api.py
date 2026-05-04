@@ -832,44 +832,48 @@ def create_quotation_from_portal(opportunity=None, items=None):
 
     from erpnext.crm.doctype.opportunity.opportunity import make_quotation
 
-    # Elevate to Administrator so make_quotation succeeds regardless of the
-    # portal user's role assignments ("You do not have enough permissions").
+    # Elevate to Administrator for the entire quotation creation pipeline.
+    # The scope must cover make_quotation(), get_doc(), set_missing_values(),
+    # calculate_taxes_and_totals(), and insert() — all of which read related
+    # ERPNext documents (price lists, tax templates, customer records) that the
+    # portal user does not have read permission for.
     saved_user = frappe.session.user
     try:
         frappe.set_user("Administrator")
         quotation_dict = make_quotation(opportunity)
+
+        quotation = frappe.get_doc(quotation_dict)
+        quotation.set("items", [])
+        quotation.opportunity = accessible_opportunity.name
+
+        for row in payload_items:
+            item_code = (row or {}).get("item_code")
+            qty = flt((row or {}).get("qty"))
+            rate = (row or {}).get("rate")
+            description = (row or {}).get("description") or ""
+            if not item_code:
+                frappe.throw("Each item requires an item_code")
+            if qty <= 0:
+                frappe.throw(f"Quantity must be greater than zero for item {item_code}")
+
+            item = {"item_code": item_code, "qty": qty}
+            if rate not in (None, ""):
+                item["rate"] = flt(rate)
+            if description:
+                item["description"] = description
+
+            quotation.append("items", item)
+
+        quotation.flags.ignore_permissions = True
+        quotation.run_method("set_missing_values")
+        quotation.run_method("calculate_taxes_and_totals")
+        quotation.insert()
+        frappe.db.commit()
+        quotation_name = quotation.name
     finally:
         frappe.set_user(saved_user)
 
-    quotation = frappe.get_doc(quotation_dict)
-    quotation.set("items", [])
-    quotation.opportunity = accessible_opportunity.name
-
-    for row in payload_items:
-        item_code = (row or {}).get("item_code")
-        qty = flt((row or {}).get("qty"))
-        rate = (row or {}).get("rate")
-        if not item_code:
-            frappe.throw("Each item requires an item_code")
-        if qty <= 0:
-            frappe.throw(f"Quantity must be greater than zero for item {item_code}")
-
-        item = {
-            "item_code": item_code,
-            "qty": qty,
-        }
-        if rate not in (None, ""):
-            item["rate"] = flt(rate)
-
-        quotation.append("items", item)
-
-    quotation.flags.ignore_permissions = True
-    quotation.run_method("set_missing_values")
-    quotation.run_method("calculate_taxes_and_totals")
-    quotation.insert()
-    frappe.db.commit()
-
-    return {"status": "success", "quotation": quotation.name}
+    return {"status": "success", "quotation": quotation_name}
 
 
 @frappe.whitelist(allow_guest=True, methods=["GET", "POST"])
