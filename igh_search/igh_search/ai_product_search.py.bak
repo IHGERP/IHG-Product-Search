@@ -182,8 +182,6 @@ DISPLAY_QUERY_PHRASES = {
         "available stock",
         "available now",
         "only in stock",
-        "on stock",
-        "instock",
     ),
     "stock:desc": (
         "high stock",
@@ -207,8 +205,7 @@ DISPLAY_QUERY_PHRASES = {
 
 def build_default_filters():
     filters = {key: [] for key in ARRAY_FILTER_KEYS}
-    filters.update({key: None for key in BOOLEAN_FILTER_KEYS})
-    filters["in_stock"] = True
+    filters.update({key: False for key in BOOLEAN_FILTER_KEYS})
     filters.update(copy.deepcopy(RANGE_FILTER_DEFAULTS))
     return filters
 
@@ -833,23 +830,8 @@ def _add_filter_value(intent, filter_key, value, source, confidence=1.0, hard=Fa
     if filter_key not in intent["filters"] or filter_key not in ARRAY_FILTER_KEYS:
         return
     value = cstr(value).strip()
-    if not value:
+    if not value or value in intent["filters"][filter_key]:
         return
-
-    normalized_value = normalize_text(value).replace(" ", "")
-    if filter_key in {"input_voltage", "output_voltage"} and normalized_value.endswith("ma"):
-        return
-    if filter_key == "output_current" and normalized_value.endswith("v"):
-        return
-
-    existing_values = {
-        normalize_text(existing).replace(" ", "")
-        for existing in (intent["filters"].get(filter_key) or [])
-        if cstr(existing).strip()
-    }
-    if normalized_value in existing_values:
-        return
-
     intent["filters"][filter_key].append(value)
     intent["confidence_map"][filter_key] = max(
         flt(intent["confidence_map"].get(filter_key)),
@@ -1030,13 +1012,6 @@ def _match_known_values(normalized_message, known_values):
         for normalized_value, canonical_value in values.items():
             if not normalized_value:
                 continue
-
-            compact_value = cstr(normalized_value).replace(" ", "")
-            if filter_key in {"input_voltage", "output_voltage"} and compact_value.endswith("ma"):
-                continue
-            if filter_key == "output_current" and compact_value.endswith("v"):
-                continue
-
             if re.search(rf"(?<![a-z0-9]){re.escape(normalized_value)}(?![a-z0-9])", normalized_message):
                 matches.setdefault(filter_key, []).append(canonical_value)
     return matches
@@ -1173,7 +1148,7 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
         _add_filter_value(intent, "beam_angle", beam_value, "regex", confidence=0.9, hard=True)
         break
 
-    if any(phrase in normalized_message for phrase in ("in stock", "on stock", "instock", "available stock", "available now")):
+    if any(phrase in normalized_message for phrase in ("in stock", "available stock", "available now")):
         _set_boolean_filter(intent, "in_stock", True, "phrase", confidence=1.0)
 
     if any(phrase in normalized_message for phrase in ("high stock", "most stock", "stock high to low", "quantity wise", "quantity high to low")):
@@ -1267,25 +1242,9 @@ def _build_model_messages(message, page_context, vocabulary, deterministic_inten
         {
             "message": "driver 24v 350ma",
             "response": {
-                "query": "led driver",
+                "query": "driver",
                 "sort_by": "",
                 "filters": {"input_voltage": ["24V"], "output_current": ["350MA"]},
-            },
-        },
-        {
-            "message": "10w 3000k spotlight for hotel corridor",
-            "response": {
-                "query": "spotlight",
-                "sort_by": "",
-                "filters": {"power": ["10W"], "color_temp": ["3000K"]},
-            },
-        },
-        {
-            "message": "warm white led strip 24v waterproof",
-            "response": {
-                "query": "led strip",
-                "sort_by": "",
-                "filters": {"input_voltage": ["24V"], "color_temp": ["3000K"], "ip_rate": ["IP65"]},
             },
         },
         {
@@ -1300,20 +1259,12 @@ def _build_model_messages(message, page_context, vocabulary, deterministic_inten
 
     system_prompt = f"""
 You convert natural-language product discovery requests into structured search intent for a Typesense-backed product listing API.
-This catalog is focused on lighting products and related electrical items such as luminaires, LED strips, profiles, drivers, dimming gear, switches, sockets, and switchgear.
 Return ONLY valid JSON. Do not return markdown. Do not add keys outside the required schema.
 
 Required JSON shape:
 {json.dumps(response_shape, ensure_ascii=True)}
 
-Domain rules:
-- Interpret the request as a lighting and electrical sourcing request first, not as general ecommerce.
-- Prefer lighting nouns in the query such as downlight, spotlight, track light, panel light, flood light, high bay, wall washer, LED strip, aluminium profile, batten light, emergency light, driver, dimmer, sensor, switchgear.
-- Treat electrical specification language as high-signal: wattage, color temperature/CCT, IP rating, beam angle, input voltage, output current, output voltage, dimming protocol, mounting type, lumen output.
-- If the user mentions a use case like outdoor, facade, corridor, hotel, office, retail, or display, prefer lighting interpretations that support that use case.
-- For terms like driver, strip, profile, track, panel, batten, flood, spot, and emergency, keep the query aligned to the lighting product family rather than generic meanings.
-
-General rules:
+Rules:
 - Use ONLY the current V2 contract field names.
 - Never use legacy keys such as color_temp_, input, warranty_, or price_range.
 - Prefer existing supported filters and known values.
@@ -2008,8 +1959,6 @@ def get_query_feedback_scores(normalized_query):
 def rerank_hits_with_feedback(hits, normalized_query, intent):
     if not hits or intent.get("intent_class") == "sku_lookup":
         return hits, {}
-    if cstr(intent.get("sort_by") or "").strip():
-        return hits, {}
     feedback_scores = get_query_feedback_scores(normalized_query)
     if not feedback_scores:
         return hits, {}
@@ -2027,8 +1976,6 @@ def rerank_hits_with_feedback(hits, normalized_query, intent):
 
 def rerank_hits_with_compatibility(hits, intent):
     if not hits:
-        return hits
-    if cstr(intent.get("sort_by") or "").strip():
         return hits
     if intent.get("intent_class") not in {"spec_match", "alternatives", "stock_priority", "discount_priority"}:
         return hits

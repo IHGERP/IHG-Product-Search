@@ -4,27 +4,225 @@
     {
       "id": "warm_white",
       "canonical": "3000k",
-      "aliases": ["warm white", "warmwhite"]
+      "aliases": [
+        "warm white",
+        "warmwhite"
+      ]
     },
     {
       "id": "cool_white",
       "canonical": "6500k",
-      "aliases": ["cool white", "coolwhite"]
+      "aliases": [
+        "cool white",
+        "coolwhite"
+      ]
     },
     {
       "id": "cct",
       "canonical": "color temperature",
-      "aliases": ["cct", "colour temperature"]
+      "aliases": [
+        "cct",
+        "colour temperature"
+      ]
     },
     {
       "id": "driver",
       "canonical": "led driver",
-      "aliases": ["driver", "power supply"]
+      "aliases": [
+        "driver",
+        "power supply"
+      ]
     },
     {
       "id": "downlight",
       "canonical": "downlight",
-      "aliases": ["down light", "down-light"]
+      "aliases": [
+        "down light",
+        "down-light"
+      ]
+    },
+    {
+      "id": "spotlight",
+      "canonical": "spotlight",
+      "aliases": [
+        "spot light",
+        "spot-light",
+        "spotlights"
+      ]
+    },
+    {
+      "id": "track_light",
+      "canonical": "track light",
+      "aliases": [
+        "tracklight",
+        "track-light",
+        "track spotlight"
+      ]
+    },
+    {
+      "id": "strip_light",
+      "canonical": "led strip",
+      "aliases": [
+        "strip light",
+        "striplight",
+        "led strip light",
+        "tape light",
+        "tape lighting"
+      ]
+    },
+    {
+      "id": "flood_light",
+      "canonical": "flood light",
+      "aliases": [
+        "floodlight",
+        "flood-light"
+      ]
+    },
+    {
+      "id": "high_bay",
+      "canonical": "high bay",
+      "aliases": [
+        "highbay",
+        "high-bay"
+      ]
+    },
+    {
+      "id": "wall_washer",
+      "canonical": "wall washer",
+      "aliases": [
+        "wallwasher",
+        "wall-washer",
+        "wall wash"
+      ]
+    },
+    {
+      "id": "cob_strip",
+      "canonical": "cob strip",
+      "aliases": [
+        "cob led strip",
+        "cob tape"
+      ]
+    },
+    {
+      "id": "profile_channel",
+      "canonical": "aluminium profile",
+      "aliases": [
+        "channel",
+        "profile channel",
+        "aluminium channel",
+        "channelume",
+        "channel ume"
+      ]
+    },
+    {
+      "id": "emergency_light",
+      "canonical": "emergency light",
+      "aliases": [
+        "emergency fitting",
+        "emergency lamp",
+        "emergency lights"
+      ]
+    },
+    {
+      "id": "panel_light",
+      "canonical": "panel light",
+      "aliases": [
+        "panel",
+        "led panel",
+        "panel lights"
+      ]
+    },
+    {
+      "id": "batten",
+      "canonical": "batten light",
+      "aliases": [
+        "batten",
+        "linear batten"
+      ]
+    },
+    {
+      "id": "surface_light",
+      "canonical": "surface light",
+      "aliases": [
+        "surface mounted light",
+        "surface mounted fitting"
+      ]
+    },
+    {
+      "id": "recessed",
+      "canonical": "recessed",
+      "aliases": [
+        "concealed mount",
+        "recess mount"
+      ]
+    },
+    {
+      "id": "surface_mount",
+      "canonical": "surface mounted",
+      "aliases": [
+        "surface mount",
+        "surface-mounted"
+      ]
+    },
+    {
+      "id": "suspended",
+      "canonical": "suspended",
+      "aliases": [
+        "pendant mounted",
+        "hung fitting"
+      ]
+    },
+    {
+      "id": "dali",
+      "canonical": "dali",
+      "aliases": [
+        "dali dimming",
+        "dali driver"
+      ]
+    },
+    {
+      "id": "triac",
+      "canonical": "triac",
+      "aliases": [
+        "triac dimming",
+        "triac dimmable"
+      ]
+    },
+    {
+      "id": "0_10v",
+      "canonical": "0-10v",
+      "aliases": [
+        "0 10v",
+        "1-10v",
+        "0/10v"
+      ]
+    },
+    {
+      "id": "neutral_white",
+      "canonical": "4000k",
+      "aliases": [
+        "neutral white",
+        "natural white"
+      ]
+    },
+    {
+      "id": "daylight",
+      "canonical": "6500k",
+      "aliases": [
+        "day light"
+      ]
+    },
+    {
+      "id": "electrical_switchgear",
+      "canonical": "switchgear",
+      "aliases": [
+        "mcb",
+        "rcbo",
+        "isolator",
+        "contactor",
+        "distribution board",
+        "db box"
+      ]
     }
   ]
 }

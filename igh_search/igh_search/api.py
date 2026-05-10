@@ -3,7 +3,15 @@ import json
 
 import frappe
 from frappe.rate_limiter import rate_limit
-from frappe.utils import flt
+from frappe.utils import add_days, flt, nowdate
+from igh_search.igh_search.product_data_issues import (
+    add_product_data_issue_comment,
+    create_product_data_issue,
+    get_product_data_issue,
+    list_product_data_issues,
+    reopen_product_data_issue,
+    update_product_data_issue,
+)
 from igh_search.igh_search.product_search_v2 import (
     get_similar_products_v2 as get_similar_products_v2_impl,
     get_sync_health_summary,
@@ -263,6 +271,52 @@ def ai_search_products_v2(
         page_length=page_length,
         include_inactive=include_inactive,
         feature_flag_override=feature_flag_override,
+    )
+
+
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=_get_ai_product_search_rate_limit, seconds=60, methods="POST")
+def start_guided_ai_search(
+    message=None,
+    page_context=None,
+    feature_flag_override=0,
+):
+    from igh_search.igh_search.guided_ai_search import start_guided_ai_search as start_guided_ai_search_impl
+
+    return start_guided_ai_search_impl(
+        message=message,
+        page_context=page_context,
+        feature_flag_override=feature_flag_override,
+    )
+
+
+@frappe.whitelist(methods=["POST"])
+@rate_limit(limit=_get_ai_product_search_rate_limit, seconds=60, methods="POST")
+def continue_guided_ai_search(
+    session_id=None,
+    source_message=None,
+    applied_query=None,
+    current_intent=None,
+    resolved_intent=None,
+    answer=None,
+    question_key=None,
+    page_context=None,
+    feature_flag_override=0,
+    skip=0,
+):
+    from igh_search.igh_search.guided_ai_search import continue_guided_ai_search as continue_guided_ai_search_impl
+
+    return continue_guided_ai_search_impl(
+        session_id=session_id,
+        source_message=source_message,
+        applied_query=applied_query,
+        current_intent=frappe.parse_json(current_intent) if isinstance(current_intent, str) else current_intent,
+        resolved_intent=frappe.parse_json(resolved_intent) if isinstance(resolved_intent, str) else resolved_intent,
+        answer=answer,
+        question_key=question_key,
+        page_context=frappe.parse_json(page_context) if isinstance(page_context, str) else page_context,
+        feature_flag_override=feature_flag_override,
+        skip=skip,
     )
 
 
@@ -832,42 +886,58 @@ def create_quotation_from_portal(opportunity=None, items=None):
 
     from erpnext.crm.doctype.opportunity.opportunity import make_quotation
 
-    # Elevate to Administrator so make_quotation succeeds regardless of the
-    # portal user's role assignments ("You do not have enough permissions").
     saved_user = frappe.session.user
     try:
-        frappe.set_user("Administrator")
         quotation_dict = make_quotation(opportunity)
+
+        quotation = frappe.get_doc(quotation_dict)
+        quotation.set("items", [])
+        quotation.opportunity = accessible_opportunity.name
+
+        for row in payload_items:
+            item_code = (row or {}).get("item_code")
+            qty = flt((row or {}).get("qty"))
+            rate = (row or {}).get("rate")
+            if not item_code:
+                frappe.throw("Each item requires an item_code")
+            if qty <= 0:
+                frappe.throw(f"Quantity must be greater than zero for item {item_code}")
+
+            item = {
+                "item_code": item_code,
+                "qty": qty,
+            }
+            if rate not in (None, ""):
+                item["rate"] = flt(rate)
+
+            quotation.append("items", item)
+
+        if not quotation.account_incharge:
+            quotation.account_incharge = saved_user
+
+        quotation.flags.ignore_permissions = True
+        quotation.flags.ignore_mandatory = True
+        quotation.run_method("set_missing_values")
+        if not quotation.branch:
+            user_branch = frappe.db.get_value("User", saved_user, "branch")
+            company_branch = quotation.company and frappe.db.get_value("Branch", {"company": quotation.company}, "name")
+            fallback_branch = frappe.db.get_value("Branch", {}, "name")
+            quotation.branch = user_branch or company_branch or fallback_branch
+        if not quotation.valid_till:
+            quotation.valid_till = add_days(nowdate(), 30)
+        quotation.run_method("calculate_taxes_and_totals")
+        quotation.insert()
+        frappe.db.sql(
+            """
+            update `tabQuotation`
+            set owner = %s, modified_by = %s, account_incharge = %s
+            where name = %s
+            """,
+            (saved_user, saved_user, saved_user, quotation.name),
+        )
+        frappe.db.commit()
     finally:
-        frappe.set_user(saved_user)
-
-    quotation = frappe.get_doc(quotation_dict)
-    quotation.set("items", [])
-    quotation.opportunity = accessible_opportunity.name
-
-    for row in payload_items:
-        item_code = (row or {}).get("item_code")
-        qty = flt((row or {}).get("qty"))
-        rate = (row or {}).get("rate")
-        if not item_code:
-            frappe.throw("Each item requires an item_code")
-        if qty <= 0:
-            frappe.throw(f"Quantity must be greater than zero for item {item_code}")
-
-        item = {
-            "item_code": item_code,
-            "qty": qty,
-        }
-        if rate not in (None, ""):
-            item["rate"] = flt(rate)
-
-        quotation.append("items", item)
-
-    quotation.flags.ignore_permissions = True
-    quotation.run_method("set_missing_values")
-    quotation.run_method("calculate_taxes_and_totals")
-    quotation.insert()
-    frappe.db.commit()
+        pass
 
     return {"status": "success", "quotation": quotation.name}
 
@@ -938,8 +1008,9 @@ def get_recent_quotations():
     _ensure_authenticated_user()
     quotations = frappe.get_all(
         "Quotation",
-        filters={"owner": frappe.session.user, "docstatus": ["!=", 2]},
-        fields=["name", "customer_name", "opportunity", "status", "grand_total", "creation"],
+        filters={"docstatus": ["!=", 2]},
+        or_filters={"owner": frappe.session.user, "account_incharge": frappe.session.user},
+        fields=["name", "customer_name", "opportunity", "status", "grand_total", "creation", "owner", "account_incharge"],
         order_by="creation desc",
         limit=20,
     )

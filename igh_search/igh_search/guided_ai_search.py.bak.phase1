@@ -1,0 +1,441 @@
+import copy
+import re
+import uuid
+
+from frappe.utils import cint, cstr, flt
+
+from igh_search.igh_search.ai_product_search import (
+    ARRAY_FILTER_KEYS,
+    BOOLEAN_FILTER_KEYS,
+    RANGE_FILTER_DEFAULTS,
+    build_ai_display_filters,
+    build_ai_display_query,
+    execute_intent_search,
+    resolve_ai_search_intent,
+    sanitize_range,
+)
+from igh_search.igh_search.search_normalization import normalize_text
+
+QUESTION_PRIORITY = [
+    "category_list",
+    "product_type",
+    "power",
+    "color_temp",
+    "ip_rate",
+    "in_stock",
+    "rate_range",
+    "mounting",
+    "beam_angle",
+    "input_voltage",
+]
+
+FAMILY_QUESTION_PRIORITIES = {
+    "driver": [
+        "product_type",
+        "input_voltage",
+        "output_current",
+        "output_voltage",
+        "in_stock",
+        "rate_range",
+    ],
+    "strip": [
+        "product_type",
+        "input_voltage",
+        "power",
+        "color_temp",
+        "ip_rate",
+        "in_stock",
+        "rate_range",
+        "mounting",
+    ],
+    "fixture": [
+        "product_type",
+        "power",
+        "color_temp",
+        "beam_angle",
+        "mounting",
+        "ip_rate",
+        "in_stock",
+        "rate_range",
+    ],
+    "outdoor": [
+        "product_type",
+        "ip_rate",
+        "power",
+        "color_temp",
+        "mounting",
+        "beam_angle",
+        "in_stock",
+        "rate_range",
+    ],
+    "electrical": [
+        "category_list",
+        "product_type",
+        "input_voltage",
+        "in_stock",
+        "rate_range",
+    ],
+}
+
+SKIP_ANSWER_RE = re.compile(r"^(any|anything|any one|no preference|doesn't matter|dont care|do not care|skip|all|either|whatever)$", re.I)
+
+QUESTION_COPY = {
+    "category_list": "What lighting or electrical category are you looking for?",
+    "product_type": "Do you already know the exact product type?",
+    "power": "What wattage or power range do you need?",
+    "color_temp": "What color temperature should I target?",
+    "ip_rate": "Do you need a specific IP rating?",
+    "in_stock": "Should I keep this to in-stock products only?",
+    "rate_range": "Do you have a budget range in mind?",
+    "mounting": "Any mounting preference?",
+    "beam_angle": "Do you need a beam angle requirement?",
+    "input_voltage": "Do you need a particular input voltage?",
+    "output_current": "What output current should I target?",
+    "output_voltage": "What output voltage should I target?",
+}
+
+FAMILY_KEYWORDS = {
+    "driver": [
+        "driver",
+        "led driver",
+        "power supply",
+        "constant current",
+        "constant voltage",
+        "triac",
+        "dali",
+        "0-10v",
+        "1-10v",
+        "dimmable driver",
+    ],
+    "strip": [
+        "led strip",
+        "strip",
+        "tape light",
+        "tape lighting",
+        "cob strip",
+        "flexible strip",
+        "profile",
+        "aluminium profile",
+        "channelume",
+    ],
+    "outdoor": [
+        "outdoor",
+        "landscape",
+        "facade",
+        "garden",
+        "pathway",
+        "bollard",
+        "flood light",
+        "floodlight",
+        "wall washer",
+        "inground",
+    ],
+    "fixture": [
+        "spotlight",
+        "spot light",
+        "track light",
+        "downlight",
+        "panel light",
+        "surface light",
+        "batten",
+        "high bay",
+        "emergency light",
+        "wall light",
+        "ceiling light",
+        "linear light",
+    ],
+    "electrical": [
+        "switch",
+        "socket",
+        "switchgear",
+        "isolator",
+        "contactor",
+        "mcb",
+        "rcbo",
+        "db box",
+        "distribution board",
+        "sensor",
+    ],
+}
+
+
+def _clean_filters(filters):
+    safe_filters = {key: [] for key in ARRAY_FILTER_KEYS}
+    safe_filters.update({key: False for key in BOOLEAN_FILTER_KEYS})
+    safe_filters.update(copy.deepcopy(RANGE_FILTER_DEFAULTS))
+
+    raw_filters = filters if isinstance(filters, dict) else {}
+
+    for key in ARRAY_FILTER_KEYS:
+        values = raw_filters.get(key) or []
+        safe_filters[key] = [cstr(value).strip() for value in values if cstr(value).strip()]
+
+    for key in BOOLEAN_FILTER_KEYS:
+        safe_filters[key] = bool(raw_filters.get(key))
+
+    for key, defaults in RANGE_FILTER_DEFAULTS.items():
+        safe_filters[key] = sanitize_range(raw_filters.get(key), defaults)
+
+    return safe_filters
+
+
+def _is_range_active(range_value, defaults):
+    sanitized = sanitize_range(range_value, defaults)
+    return flt(sanitized.get("min")) != flt(defaults.get("min")) or flt(sanitized.get("max")) != flt(defaults.get("max"))
+
+
+def _is_question_resolved(intent_filters, question_key):
+    if question_key in ARRAY_FILTER_KEYS:
+        return bool(intent_filters.get(question_key))
+    if question_key in BOOLEAN_FILTER_KEYS:
+        return intent_filters.get(question_key) is True
+    if question_key in RANGE_FILTER_DEFAULTS:
+        return _is_range_active(intent_filters.get(question_key), RANGE_FILTER_DEFAULTS[question_key])
+    return False
+
+
+def _normalized_text_blob(intent, source_message=None):
+    parts = [
+        cstr(source_message or ""),
+        cstr(intent.get("query") or ""),
+        " ".join(cstr(v) for v in intent.get("filters", {}).get("category_list") or []),
+        " ".join(cstr(v) for v in intent.get("filters", {}).get("product_type") or []),
+        " ".join(cstr(v) for v in intent.get("filters", {}).get("lamp_type") or []),
+    ]
+    return normalize_text(" ".join(part for part in parts if part).strip())
+
+
+def _detect_product_family(intent, source_message=None):
+    blob = _normalized_text_blob(intent, source_message=source_message)
+    if not blob:
+        return "generic"
+
+    if any(keyword in blob for keyword in FAMILY_KEYWORDS["driver"]):
+        return "driver"
+    if any(keyword in blob for keyword in FAMILY_KEYWORDS["strip"]):
+        return "strip"
+    if any(keyword in blob for keyword in FAMILY_KEYWORDS["outdoor"]):
+        return "outdoor"
+    if any(keyword in blob for keyword in FAMILY_KEYWORDS["fixture"]):
+        return "fixture"
+    if any(keyword in blob for keyword in FAMILY_KEYWORDS["electrical"]):
+        return "electrical"
+    return "generic"
+
+
+def _determine_question_key(intent_filters, result_count=0, skipped_question=None, product_family="generic"):
+    if result_count and 0 < cint(result_count) <= 5:
+        return ""
+
+    priority = []
+    for question_key in FAMILY_QUESTION_PRIORITIES.get(product_family, []):
+        if question_key not in priority:
+            priority.append(question_key)
+    for question_key in QUESTION_PRIORITY:
+        if question_key not in priority:
+            priority.append(question_key)
+
+    for question_key in priority:
+        if question_key == skipped_question:
+            continue
+        if question_key == "product_type" and product_family in {"driver", "strip", "fixture", "outdoor", "electrical"}:
+            continue
+        if not _is_question_resolved(intent_filters, question_key):
+            return question_key
+    return ""
+
+
+def _parse_numeric_values(answer):
+    return [flt(match) for match in re.findall(r"\d+(?:\.\d+)?", cstr(answer or ""))]
+
+
+def _normalize_bool_answer(answer):
+    normalized = cstr(answer or "").strip().lower()
+    if normalized in {"yes", "y", "true", "1", "instock", "in stock", "available"}:
+        return True
+    if normalized in {"no", "n", "false", "0"}:
+        return False
+    return None
+
+
+def _is_skip_answer(answer):
+    return bool(SKIP_ANSWER_RE.match(cstr(answer or "").strip()))
+
+
+def _apply_answer_to_filters(intent_filters, question_key, answer):
+    next_filters = _clean_filters(intent_filters)
+    normalized_answer = cstr(answer or "").strip()
+
+    if not question_key or not normalized_answer:
+        return next_filters
+
+    if question_key in ARRAY_FILTER_KEYS:
+        next_filters[question_key] = [normalized_answer]
+        return next_filters
+
+    if question_key in BOOLEAN_FILTER_KEYS:
+        parsed = _normalize_bool_answer(normalized_answer)
+        if parsed is not None:
+            next_filters[question_key] = parsed
+        return next_filters
+
+    if question_key in RANGE_FILTER_DEFAULTS:
+        defaults = RANGE_FILTER_DEFAULTS[question_key]
+        values = _parse_numeric_values(normalized_answer)
+        minimum = flt(defaults.get("min"))
+        maximum = flt(defaults.get("max"))
+
+        if len(values) >= 2:
+            next_filters[question_key] = {
+                "min": min(values[0], values[1]),
+                "max": max(values[0], values[1]),
+            }
+            return next_filters
+
+        if len(values) == 1:
+            value = flt(values[0])
+            lowered = normalized_answer.lower()
+            if any(token in lowered for token in ["under", "below", "max", "upto", "up to", "less"]):
+                next_filters[question_key] = {"min": minimum, "max": value}
+            elif any(token in lowered for token in ["over", "above", "min", "more"]):
+                next_filters[question_key] = {"min": value, "max": maximum}
+            else:
+                next_filters[question_key] = {"min": minimum, "max": value}
+
+    return next_filters
+
+
+def _combine_source_message(source_message, answer):
+    parts = [cstr(source_message or "").strip(), cstr(answer or "").strip()]
+    return " ".join(part for part in parts if part).strip()
+
+
+def _merge_filters(base_filters, fresh_filters):
+    merged = _clean_filters(base_filters)
+    fresh = _clean_filters(fresh_filters)
+
+    for key in ARRAY_FILTER_KEYS:
+        if fresh.get(key):
+            merged[key] = fresh[key]
+
+    for key in BOOLEAN_FILTER_KEYS:
+        if fresh.get(key):
+            merged[key] = True
+
+    for key, defaults in RANGE_FILTER_DEFAULTS.items():
+        if _is_range_active(fresh.get(key), defaults):
+            merged[key] = sanitize_range(fresh.get(key), defaults)
+
+    return merged
+
+
+def _build_assistant_message(result_count, question_key, done, skipped_question=None, zero_results=False):
+    if zero_results:
+        return "That answer narrowed the search too much and no products match right now. You can broaden the last requirement or skip this question."
+    if done:
+        return "I have narrowed the catalog as far as needed for now. You can browse these filtered results or ask for one more refinement."
+    if skipped_question:
+        return f"No problem, I skipped that for now. {QUESTION_COPY.get(question_key, 'Tell me a bit more so I can narrow the catalog.')}"
+    return QUESTION_COPY.get(question_key, "Tell me a bit more so I can narrow the catalog.")
+
+
+def _build_response(intent, result_count, session_id, next_question_key, product_family, skipped_question=None, zero_results=False):
+    applied_filters = _clean_filters(intent.get("filters"))
+    applied_sort = cstr(intent.get("sort_by") or "").strip()
+    done = not next_question_key or (0 < cint(result_count) <= 5)
+    assistant_message = _build_assistant_message(
+        result_count=result_count,
+        question_key=next_question_key,
+        done=done,
+        skipped_question=skipped_question,
+        zero_results=zero_results,
+    )
+
+    priority = []
+    for question_key in FAMILY_QUESTION_PRIORITIES.get(product_family, []):
+        if question_key not in priority:
+            priority.append(question_key)
+    for question_key in QUESTION_PRIORITY:
+        if question_key not in priority:
+            priority.append(question_key)
+
+    return {
+        "session_id": session_id or str(uuid.uuid4()),
+        "assistant_message": assistant_message,
+        "applied_query": cstr(intent.get("query") or "").strip(),
+        "applied_filters": applied_filters,
+        "applied_sort": applied_sort,
+        "display_filters": build_ai_display_filters(applied_filters),
+        "missing_fields": [question_key for question_key in priority if not _is_question_resolved(applied_filters, question_key)],
+        "next_question": QUESTION_COPY.get(next_question_key, "") if not done else "",
+        "question_type": "boolean" if next_question_key in BOOLEAN_FILTER_KEYS else "text",
+        "question_key": next_question_key,
+        "suggested_answers": [],
+        "result_count": cint(result_count),
+        "done": done,
+        "resolved_intent": intent.get("resolved_intent") or {},
+        "display_query": build_ai_display_query(intent.get("query"), intent, applied_filters, applied_sort),
+        "explanation": intent.get("explanation") or "",
+        "product_family": product_family,
+    }
+
+
+def _search_count(intent, feature_flag_override=0):
+    response = execute_intent_search(
+        intent,
+        page=1,
+        page_length=1,
+        include_inactive=0,
+        feature_flag_override=feature_flag_override,
+    )
+    return cint(response.get("found") or 0)
+
+
+def start_guided_ai_search(message=None, page_context=None, feature_flag_override=0):
+    intent = resolve_ai_search_intent(message=message, page_context=page_context, mode="fast")
+    product_family = _detect_product_family(intent, source_message=message)
+    result_count = _search_count(intent, feature_flag_override=feature_flag_override) if cstr(message).strip() else 0
+    next_question_key = _determine_question_key(intent.get("filters") or {}, result_count=result_count, product_family=product_family)
+    return _build_response(intent, result_count, str(uuid.uuid4()), next_question_key, product_family)
+
+
+def continue_guided_ai_search(
+    session_id=None,
+    source_message=None,
+    applied_query=None,
+    current_intent=None,
+    resolved_intent=None,
+    answer=None,
+    question_key=None,
+    page_context=None,
+    feature_flag_override=0,
+    skip=0,
+):
+    base_message = _combine_source_message(source_message or applied_query, "" if cint(skip) else answer)
+    intent = resolve_ai_search_intent(message=base_message, page_context=page_context, mode="fast")
+
+    merged_filters = _merge_filters(current_intent or {}, intent.get("filters") or {})
+    if question_key and not cint(skip) and cstr(answer).strip():
+        merged_filters = _apply_answer_to_filters(merged_filters, question_key, answer)
+
+    intent["filters"] = merged_filters
+    if not cstr(intent.get("query") or "").strip():
+        intent["query"] = cstr(applied_query or "").strip()
+    if resolved_intent and not intent.get("resolved_intent"):
+        intent["resolved_intent"] = resolved_intent
+
+    product_family = _detect_product_family(intent, source_message=base_message)
+    result_count = _search_count(intent, feature_flag_override=feature_flag_override) if (intent.get("query") or any(intent.get("filters", {}).values())) else 0
+    zero_results = cint(result_count) == 0 and bool(cstr(answer).strip()) and not cint(skip)
+    skipped_question = question_key if cint(skip) or _is_skip_answer(answer) else ""
+
+    if zero_results and question_key:
+        reverted_filters = _clean_filters(current_intent or {})
+        intent["filters"] = reverted_filters
+        intent["query"] = cstr(applied_query or intent.get("query") or "").strip()
+        result_count = _search_count(intent, feature_flag_override=feature_flag_override) if (intent.get("query") or any(intent.get("filters", {}).values())) else 0
+        next_question_key = _determine_question_key(intent.get("filters") or {}, result_count=result_count, skipped_question=question_key, product_family=product_family)
+        return _build_response(intent, result_count, session_id or str(uuid.uuid4()), next_question_key, product_family, skipped_question=question_key, zero_results=True)
+
+    next_question_key = _determine_question_key(intent.get("filters") or {}, result_count=result_count, skipped_question=skipped_question, product_family=product_family)
+    return _build_response(intent, result_count, session_id or str(uuid.uuid4()), next_question_key, product_family, skipped_question=skipped_question, zero_results=False)
