@@ -184,9 +184,12 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
         )
         update_sync_log(log_name, "Success", retry_count=retry_count, finished=True)
     except Exception:
-        frappe.db.set_value(
-            "Typesense Settings", "Typesense Settings", "is_sync", 0, update_modified=False
-        )
+        try:
+            frappe.db.set_value(
+                "Typesense Settings", "Typesense Settings", "is_sync", 0, update_modified=False
+            )
+        except Exception:
+            pass
         _retry_job(
             job_method=get_product_schema_data_qr_job,
             job_kwargs={"log_name": log_name},
@@ -258,9 +261,17 @@ def get_product_schema_data(item_code=None, version="v1"):
     frappe.throw("Unsupported product schema version")
 
 
-def fetch_item_base_data(item_codes=None):
+def fetch_item_base_data(item_codes=None, batch_size=5000):
     company = frappe.db.get_value("E Commerce Settings", "E Commerce Settings", "company")
     item_codes = normalize_item_codes(item_codes)
+
+    if item_codes:
+        return _fetch_item_base_data_filtered(company, item_codes)
+
+    return _fetch_item_base_data_in_batches(company, batch_size)
+
+
+def _fetch_item_base_data_filtered(company, item_codes):
     item_code_filter_item = get_item_filter_sql(item_codes, alias="it")
     item_code_filter_price = get_item_filter_sql(item_codes, alias="i")
 
@@ -269,6 +280,45 @@ def fetch_item_base_data(item_codes=None):
     )
     sold_last_30_days = get_wise_sold_last_30_days(company, item_code=item_code_filter_price)
     item_wise_stock = get_item_wise_stock(company, item_code=item_code_filter_price)
+
+    rows = _execute_item_base_query(item_code_filter_item)
+    _enrich_item_rows(rows, item_price_list_data, sold_last_30_days, item_wise_stock)
+    return rows
+
+
+def _fetch_item_base_data_in_batches(company, batch_size=5000):
+    all_rows = []
+    offset = 0
+
+    while True:
+        batch_item_codes = frappe.db.sql(
+            f"SELECT name FROM `tabItem` LIMIT {batch_size} OFFSET {offset}",
+            as_list=1,
+        )
+
+        if not batch_item_codes:
+            break
+
+        batch_item_codes = [code[0] for code in batch_item_codes]
+        item_code_filter = get_item_filter_sql(batch_item_codes, alias="it")
+        item_code_filter_price = get_item_filter_sql(batch_item_codes, alias="i")
+
+        item_price_list_data = get_item_wise__price_list(
+            BASE_PRICE_LIST, PROMO_PRICE_LIST, item_code=item_code_filter_price
+        )
+        sold_last_30_days = get_wise_sold_last_30_days(company, item_code=item_code_filter_price)
+        item_wise_stock = get_item_wise_stock(company, item_code=item_code_filter_price)
+
+        rows = _execute_item_base_query(item_code_filter)
+        _enrich_item_rows(rows, item_price_list_data, sold_last_30_days, item_wise_stock)
+        all_rows.extend(rows)
+
+        offset += batch_size
+
+    return all_rows
+
+
+def _execute_item_base_query(item_code_filter_item):
 
     rows = frappe.db.sql(
         f"""
@@ -354,7 +404,10 @@ def fetch_item_base_data(item_codes=None):
         """,
         as_dict=1,
     )
+    return rows
 
+
+def _enrich_item_rows(rows, item_price_list_data, sold_last_30_days, item_wise_stock):
     for row in rows:
         rate_offer_rate = item_price_list_data.get(row["item_code"], {})
         row["rate"] = rate_offer_rate.get("price_list_rate") or 0
@@ -370,7 +423,6 @@ def fetch_item_base_data(item_codes=None):
         row["frequently_bought_together"] = ""
 
     enrich_rows_with_item_metadata(rows)
-    return rows
 
 
 def build_v1_documents(rows):
