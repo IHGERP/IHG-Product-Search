@@ -156,6 +156,7 @@ def sync_items_to_typesense(client):
         queue="long",
         job_name="get_product_schema_data",
         enqueue_after_commit=True,
+        retry_count=0,
         log_name=log_name,
     )
 

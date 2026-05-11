@@ -135,21 +135,6 @@ FILTER_REGISTRY = {
 
 QUESTION_ORDER = [key for key in FILTER_REGISTRY.keys()]
 
-RESULT_PROFILE_KEYWORDS = {
-    "fixture": ["spot", "downlight", "track", "panel", "batten", "high bay", "wall light", "ceiling", "linear light"],
-    "strip": ["strip", "profile", "channel", "channelume", "cob", "tape"],
-    "driver": ["driver", "power supply", "constant current", "constant voltage", "dali", "triac", "dimmable"],
-    "outdoor": ["outdoor", "facade", "garden", "landscape", "bollard", "flood", "wall washer", "inground"],
-    "electrical": ["switch", "socket", "mcb", "rcbo", "contactor", "isolator", "sensor", "switchgear"],
-}
-
-PROFILE_FILTER_BONUSES = {
-    "fixture": {"power": 0.45, "color_temp": 0.55, "beam_angle": 0.95, "mounting": 0.7, "ip_rate": 0.45, "input_voltage": -0.75, "output_current": -0.95, "output_voltage": -0.8},
-    "strip": {"input_voltage": 0.8, "power": 0.65, "color_temp": 0.55, "ip_rate": 0.45, "mounting": 0.4, "beam_angle": -0.9, "output_current": -0.45},
-    "driver": {"input_voltage": 0.8, "output_current": 1.0, "output_voltage": 0.95, "ip_rate": 0.35, "power": 0.2, "beam_angle": -1.1, "mounting": -0.55, "color_temp": -0.7},
-    "outdoor": {"ip_rate": 1.05, "mounting": 0.6, "power": 0.45, "color_temp": 0.35, "beam_angle": 0.25, "input_voltage": -0.25, "output_current": -0.85},
-    "electrical": {"product_type": 0.55, "brand": 0.3, "input_voltage": 0.35, "rate_range": 0.2, "beam_angle": -1.2, "color_temp": -0.8, "mounting": -0.35},
-}
 
 def _clean_filters(filters):
     safe_filters = {key: [] for key in ARRAY_FILTER_KEYS}
@@ -227,109 +212,6 @@ def _normalized_phrase_variants(value):
     return {variant for variant in variants if variant}
 
 
-def _tokenize_normalized_text(value):
-    return [token for token in normalize_text(value).split() if token]
-
-
-def _singularize_tokens(tokens):
-    return [_singularize_token(token) for token in tokens if token]
-
-
-def _filter_value_phrase_candidates(question_key, value):
-    candidates = set()
-    raw = normalize_text(value)
-    label = normalize_text(_normalize_option_label(question_key, value))
-
-    for candidate in (raw, label):
-        if not candidate:
-            continue
-        candidates.add(candidate)
-        singular = normalize_text(" ".join(_singularize_tokens(candidate.split())))
-        if singular:
-            candidates.add(singular)
-
-    return sorted((candidate for candidate in candidates if candidate), key=len, reverse=True)
-
-
-def _remove_phrase_tokens(query_tokens, phrase_tokens):
-    if not query_tokens or not phrase_tokens or len(phrase_tokens) > len(query_tokens):
-        return query_tokens, False
-
-    phrase_len = len(phrase_tokens)
-    query_singular = _singularize_tokens(query_tokens)
-    phrase_singular = _singularize_tokens(phrase_tokens)
-
-    for index in range(len(query_tokens) - phrase_len + 1):
-        window = query_tokens[index:index + phrase_len]
-        if window == phrase_tokens:
-            return query_tokens[:index] + query_tokens[index + phrase_len:], True
-
-        if query_singular[index:index + phrase_len] == phrase_singular:
-            return query_tokens[:index] + query_tokens[index + phrase_len:], True
-
-    return query_tokens, False
-
-
-def _strip_consumed_query_terms(query, intent_filters):
-    query_tokens = _tokenize_normalized_text(query)
-    if not query_tokens:
-        return ""
-
-    consumed = False
-    covered_tokens = set()
-
-    for question_key in ARRAY_FILTER_KEYS:
-        for value in intent_filters.get(question_key) or []:
-            for phrase in _filter_value_phrase_candidates(question_key, value):
-                phrase_tokens = _tokenize_normalized_text(phrase)
-                if not phrase_tokens:
-                    continue
-                for token in phrase_tokens:
-                    if token and (len(token) >= 4 or any(char.isdigit() for char in token)):
-                        covered_tokens.add(token)
-
-                while True:
-                    query_tokens, removed = _remove_phrase_tokens(query_tokens, phrase_tokens)
-                    if not removed:
-                        break
-                    consumed = True
-
-    if intent_filters.get("in_stock"):
-        for phrase in ("in stock", "instock", "available now", "available"):
-            phrase_tokens = _tokenize_normalized_text(phrase)
-            while True:
-                query_tokens, removed = _remove_phrase_tokens(query_tokens, phrase_tokens)
-                if not removed:
-                    break
-                consumed = True
-
-    if query_tokens and covered_tokens:
-        filtered_tokens = []
-        for token in query_tokens:
-            singular = _singularize_token(token)
-            if token in covered_tokens or singular in covered_tokens:
-                consumed = True
-                continue
-            filtered_tokens.append(token)
-        query_tokens = filtered_tokens
-
-    if not consumed:
-        return normalize_text(query)
-
-    return normalize_text(" ".join(query_tokens))
-
-
-def _finalize_intent_query(intent, fallback_query=""):
-    filters = _clean_filters(intent.get("filters") or {})
-    raw_query = cstr(intent.get("query") or "").strip()
-    if not raw_query and fallback_query:
-        raw_query = cstr(fallback_query).strip()
-
-    intent["filters"] = filters
-    intent["query"] = _strip_consumed_query_terms(raw_query, filters) if raw_query else ""
-    return intent
-
-
 def _query_filter_match_score(query, candidate):
     query_variants = _normalized_phrase_variants(query)
     candidate_variants = _normalized_phrase_variants(candidate)
@@ -350,18 +232,6 @@ def _query_filter_match_score(query, candidate):
             if overlap:
                 best = max(best, overlap / max(len(query_words), len(candidate_words)))
     return best
-
-
-def _query_words_covered(query, candidate):
-    query_words = {word for word in normalize_text(query).split() if word}
-    candidate_words = {word for word in normalize_text(candidate).split() if word}
-    if not query_words or not candidate_words:
-        return False
-    if query_words.issubset(candidate_words):
-        return True
-    singular_query = {_singularize_token(word) for word in query_words}
-    singular_candidate = {_singularize_token(word) for word in candidate_words}
-    return singular_query.issubset(singular_candidate)
 
 
 def _promote_query_into_filters(intent):
@@ -393,7 +263,7 @@ def _promote_query_into_filters(intent):
         filters[best_match["question_key"]] = [best_match["value"]]
         query_variants = _normalized_phrase_variants(query)
         value_variants = _normalized_phrase_variants(best_match["value"])
-        if query_variants & value_variants or best_match["score"] >= 1.0 or _query_words_covered(query, best_match["value"]):
+        if query_variants & value_variants or best_match["score"] >= 1.0:
             intent["query"] = ""
         intent["filters"] = filters
         explanation = cstr(intent.get("explanation") or "").strip()
@@ -760,68 +630,7 @@ def _search_snapshot(intent, feature_flag_override=0):
     }
 
 
-def _profile_text_candidates(snapshot, intent_filters):
-    values = []
-    for question_key in ("category_list", "product_type", "item_group", "lamp_type"):
-        values.extend(intent_filters.get(question_key) or [])
-        for entry in (snapshot.get("facet_map", {}).get(question_key) or [])[:6]:
-            if isinstance(entry, dict):
-                values.append(entry.get("value"))
-    return [normalize_text(value) for value in values if cstr(value).strip()]
-
-
-def _infer_result_profile(snapshot, intent_filters):
-    texts = _profile_text_candidates(snapshot, intent_filters)
-    scores = defaultdict(float)
-    for text in texts:
-        for profile, keywords in RESULT_PROFILE_KEYWORDS.items():
-            for keyword in keywords:
-                if keyword in text:
-                    scores[profile] += 1.0
-    if not scores:
-        return "generic"
-    return sorted(scores.items(), key=lambda item: (-item[1], item[0]))[0][0]
-
-
-def _profile_bonus(profile, question_key, intent_filters):
-    bonus = flt(PROFILE_FILTER_BONUSES.get(profile, {}).get(question_key) or 0)
-
-    # As fixture searches get more specific, favor optical / installation filters earlier.
-    if profile == "fixture":
-        if question_key == "beam_angle" and _is_question_resolved(intent_filters, "power") and _is_question_resolved(intent_filters, "color_temp"):
-            bonus += 0.45
-        if question_key == "mounting" and _is_question_resolved(intent_filters, "power"):
-            bonus += 0.2
-        if question_key == "input_voltage" and (_is_question_resolved(intent_filters, "power") or _is_question_resolved(intent_filters, "color_temp")):
-            bonus -= 0.35
-
-    if profile == "strip" and question_key == "beam_angle":
-        bonus -= 0.4
-
-    if profile == "driver" and question_key in {"beam_angle", "mounting", "color_temp"}:
-        bonus -= 0.25
-
-    if profile == "outdoor" and question_key == "ip_rate":
-        bonus += 0.35
-
-    return bonus
-
-
-def _question_signal_penalty(question_key, suggestions):
-    if not suggestions:
-        return 0.0
-    if question_key in {"input_voltage", "output_voltage"}:
-        suspicious = sum(1 for option in suggestions if "MA" in cstr(option.get("label") or "").upper())
-        if suspicious:
-            return min(0.8, suspicious * 0.22)
-    if question_key == "output_current":
-        suspicious = sum(1 for option in suggestions if cstr(option.get("label") or "").upper().endswith("V"))
-        if suspicious:
-            return min(0.8, suspicious * 0.22)
-    return 0.0
-
-
-def _score_array_filter(question_key, snapshot, known_values, intent_filters, profile):
+def _score_array_filter(question_key, snapshot, known_values):
     result_count = max(cint(snapshot.get("result_count") or 0), 1)
     facet_counts = snapshot.get("facet_map", {}).get(question_key) or []
     if not facet_counts:
@@ -852,17 +661,14 @@ def _score_array_filter(question_key, snapshot, known_values, intent_filters, pr
         if avg_len > 20:
             label_penalty += min(0.6, (avg_len - 20) / 20.0)
 
-    signal_penalty = _question_signal_penalty(question_key, suggestions)
     score = (
         FILTER_REGISTRY[question_key]["base_weight"]
         + (coverage * 1.25)
         + (narrowing_power * 1.2)
         + (distinctness * 0.9)
-        + _profile_bonus(profile, question_key, intent_filters)
         - overload_penalty
         - noise_penalty
         - label_penalty
-        - signal_penalty
     )
     return score, suggestions
 
@@ -891,7 +697,6 @@ def _score_range_filter(question_key, snapshot):
 def _pick_next_question(intent_filters, snapshot, skipped_question=None):
     known_values = get_known_filter_values() or {}
     candidates = []
-    profile = _infer_result_profile(snapshot, intent_filters)
 
     for question_key in QUESTION_ORDER:
         if question_key == skipped_question:
@@ -901,13 +706,11 @@ def _pick_next_question(intent_filters, snapshot, skipped_question=None):
 
         meta = FILTER_REGISTRY[question_key]
         if meta["type"] == "array":
-            score, suggestions = _score_array_filter(question_key, snapshot, known_values, intent_filters, profile)
+            score, suggestions = _score_array_filter(question_key, snapshot, known_values)
         elif meta["type"] == "boolean":
             score, suggestions = _score_boolean_filter(question_key, snapshot)
-            score += _profile_bonus(profile, question_key, intent_filters)
         else:
             score, suggestions = _score_range_filter(question_key, snapshot)
-            score += _profile_bonus(profile, question_key, intent_filters)
 
         if score <= 0:
             continue
@@ -916,7 +719,6 @@ def _pick_next_question(intent_filters, snapshot, skipped_question=None):
                 "question_key": question_key,
                 "score": score,
                 "suggestions": suggestions,
-                "profile": profile,
             }
         )
 
@@ -1115,7 +917,6 @@ def _build_response(intent, snapshot, session_id, next_candidate=None, skipped_q
 def start_guided_ai_search(message=None, page_context=None, feature_flag_override=0):
     intent = resolve_ai_search_intent(message=message, page_context=page_context, mode="fast")
     intent = _promote_query_into_filters(intent)
-    intent = _finalize_intent_query(intent)
     snapshot = _search_snapshot(intent, feature_flag_override=feature_flag_override) if cstr(message).strip() or any((intent.get("filters") or {}).values()) else {"response": {}, "result_count": 0, "facet_map": {}}
     next_candidate = _pick_next_question(intent.get("filters") or {}, snapshot)
     return _build_response(intent, snapshot, str(uuid.uuid4()), next_candidate=next_candidate)
@@ -1161,7 +962,8 @@ def continue_guided_ai_search(
         )
 
     intent["filters"] = merged_filters
-    intent = _finalize_intent_query(intent, fallback_query=base_message or applied_query)
+    if not cstr(intent.get("query") or "").strip():
+        intent["query"] = cstr(applied_query or "").strip()
     if resolved_intent and not intent.get("resolved_intent"):
         intent["resolved_intent"] = resolved_intent
 
@@ -1171,7 +973,7 @@ def continue_guided_ai_search(
 
     if zero_results and question_key:
         intent["filters"] = _clean_filters(current_intent or {})
-        intent = _finalize_intent_query(intent, fallback_query=source_message or applied_query)
+        intent["query"] = cstr(applied_query or intent.get("query") or "").strip()
         reverted_snapshot = _search_snapshot(intent, feature_flag_override=feature_flag_override) if (intent.get("query") or any(intent.get("filters", {}).values())) else {"response": {}, "result_count": 0, "facet_map": {}}
         next_candidate = _pick_next_question(intent.get("filters") or {}, reverted_snapshot, skipped_question=question_key)
         if next_candidate and next_candidate.get("question_key") == question_key and not next_candidate.get("suggestions"):

@@ -273,7 +273,7 @@ def create_typesense_client():
                 {
                     "host": client_details.host,
                     "port": client_details.port,
-                    "protocol": client_details.protocol,
+                    "protocol": client_details.protocol if client_details.protocol in ("http", "https") else "https",
                 }
             ],
             "api_key": client_details.get_password("api_key"),
