@@ -121,3 +121,18 @@ def get_typesense_sync_health(*args, **kwargs):
 @frappe.whitelist()
 def sync_product_intelligence_to_typesense(*args, **kwargs):
     return _impl().sync_product_intelligence_to_typesense(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(allow_guest=True)
+def list_product_data_issues(*args, **kwargs):
+    return _impl().list_product_data_issues(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(allow_guest=True)
+def create_product_data_issue(*args, **kwargs):
+    return _impl().create_product_data_issue(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(allow_guest=True)
+def update_product_data_issue(*args, **kwargs):
+    return _impl().update_product_data_issue(*args, **_sanitize_framework_kwargs(kwargs))

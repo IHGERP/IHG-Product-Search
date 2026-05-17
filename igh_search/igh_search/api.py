@@ -34,6 +34,12 @@ try:
 except Exception:  # pragma: no cover
     requests = None
 
+from igh_search.igh_search.product_data_issues import (
+    create_product_data_issue as create_product_data_issue_impl,
+    list_product_data_issues as list_product_data_issues_impl,
+    update_product_data_issue as update_product_data_issue_impl,
+)
+
 
 def _sanitize_framework_kwargs(kwargs):
     cleaned = dict(kwargs or {})
@@ -1143,3 +1149,18 @@ def ai_search_products_v2(*args, **kwargs):
 def get_typesense_sync_health(*args, **kwargs):
     from igh_search.igh_search.product_search_v2 import get_sync_health_summary as _f
     return _f(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist()
+def list_product_data_issues(**kwargs):
+    return list_product_data_issues_impl(**_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist()
+def create_product_data_issue(**kwargs):
+    return create_product_data_issue_impl(**_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist()
+def update_product_data_issue(**kwargs):
+    return update_product_data_issue_impl(**_sanitize_framework_kwargs(kwargs))
