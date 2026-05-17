@@ -76,6 +76,7 @@ FILTER_FIELDS = {
     "stock_bucket",
     "price_bucket",
     "is_manufactured_item",
+    "lumen_output",
 }
 SORT_FIELDS = {
     "discount_percentage",
@@ -638,6 +639,7 @@ def search_products_v2(
     sort_by=None,
     page=1,
     page_length=20,
+    per_page=None,
     include_inactive=0,
     item_code_hint=None,
     feature_flag_override=0,
@@ -651,6 +653,12 @@ def search_products_v2(
     query_text = query_resolution["effective_query"]
     sku_like = query_resolution["sku_like"]
     sort_resolution = resolve_sort_by(sort_by, sku_like=sku_like, strict_sort=strict_sort)
+
+    if per_page not in (None, ""):
+        page_length = per_page
+
+    if per_page not in (None, ):
+        page_length = per_page
 
     search_parameters = {
         "q": query_text,
@@ -983,9 +991,23 @@ def _coerce_json(value):
     return json.loads(value)
 
 
+def _normalize_filter_list_values(values):
+    normalized = []
+    for value in values or []:
+        if isinstance(value, dict):
+            candidate = value.get("value")
+            if candidate in (None, ""):
+                candidate = value.get("label")
+            value = candidate
+        if value in (None, ""):
+            continue
+        normalized.append(value)
+    return normalized
+
+
 def parse_search_filters(filters):
     try:
-        return _coerce_json(filters) or {}
+        parsed = _coerce_json(filters) or {}
     except (TypeError, ValueError, JSONDecodeError):
         log_search_request(
             "invalid_filters",
@@ -995,6 +1017,25 @@ def parse_search_filters(filters):
             },
         )
         frappe.throw(_("Invalid filters payload for product search V2"))
+
+    if not isinstance(parsed, dict):
+        return {}
+
+    legacy_key_map = {
+        "input": "input_voltage",
+        "output": "output_voltage",
+        "current": "output_current",
+    }
+    for old_key, new_key in legacy_key_map.items():
+        if old_key in parsed and new_key not in parsed:
+            parsed[new_key] = parsed.pop(old_key)
+
+    for key in list(parsed.keys()):
+        value = parsed.get(key)
+        if isinstance(value, list):
+            parsed[key] = _normalize_filter_list_values(value)
+
+    return parsed
 
 
 def _build_filter_clause(field_name, value):

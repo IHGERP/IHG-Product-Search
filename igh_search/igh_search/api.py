@@ -932,7 +932,7 @@ def get_product_details(item_code=None, **kwargs):
 #  MASTERS  (for filter panel in search UI)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@frappe.whitelist()
+@frappe.whitelist(allow_guest=True)
 def get_all_masters(**kwargs):
     brands = frappe.db.sql(
         """
@@ -1083,3 +1083,33 @@ def get_customer_info(**kwargs):
             }
         ],
     }
+
+
+@frappe.whitelist(allow_guest=True)
+def search_products_v2(*args, **kwargs):
+    from igh_search.igh_search.product_search_v2 import search_products_v2 as _f
+    return _f(*args, **kwargs)
+
+
+@frappe.whitelist(allow_guest=True)
+def suggest_products_v2(*args, **kwargs):
+    from igh_search.igh_search.product_search_v2 import suggest_products_v2 as _f
+    return _f(*args, **kwargs)
+
+
+@frappe.whitelist(allow_guest=True)
+def get_similar_products_v2(*args, **kwargs):
+    from igh_search.igh_search.product_search_v2 import get_similar_products_v2 as _f
+    return _f(*args, **kwargs)
+
+
+@frappe.whitelist(allow_guest=True)
+def ai_search_products_v2(*args, **kwargs):
+    from igh_search.igh_search.product_search_v2 import ai_search_products_v2 as _f
+    return _f(*args, **kwargs)
+
+
+@frappe.whitelist(allow_guest=True)
+def get_typesense_sync_health(*args, **kwargs):
+    from igh_search.igh_search.product_search_v2 import get_typesense_sync_health as _f
+    return _f(*args, **kwargs)
