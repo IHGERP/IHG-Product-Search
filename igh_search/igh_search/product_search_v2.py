@@ -8,6 +8,7 @@ import typesense
 from frappe import _
 from frappe.utils import cint, cstr, flt, get_datetime, now_datetime
 
+from igh_search.igh_search.lumen_normalization import build_lumen_overlap_filter, normalize_lumen_fields
 from igh_search.igh_search.search_normalization import (
     build_price_bucket,
     build_search_keywords,
@@ -44,6 +45,11 @@ NUMERIC_RANGE_FILTERS = {
     "power_value",
     "color_temp_kelvin",
     "ip_rating_numeric",
+    "lumen_min",
+    "lumen_max",
+    "product_star_rating",
+    "customer_count",
+    "total_sold_qty_lifetime",
 }
 FILTER_FIELDS = {
     "brand",
@@ -62,12 +68,14 @@ FILTER_FIELDS = {
     "lamp_type",
     "material",
     "warranty",
+    "lumen_unit",
     "is_variant",
     "variant_of",
     "is_active",
     "in_stock",
     "stock_bucket",
     "price_bucket",
+    "is_manufactured_item",
 }
 SORT_FIELDS = {
     "discount_percentage",
@@ -102,12 +110,16 @@ FACET_FIELDS = [
     "lamp_type",
     "material",
     "warranty",
+    "lumen_unit",
     "is_variant",
     "variant_of",
     "is_active",
     "in_stock",
     "stock_bucket",
     "price_bucket",
+    "is_manufactured_item",
+    "product_star_rating",
+    "customer_count",
 ]
 SEARCH_RESULT_FIELDS = (
     "item_code",
@@ -142,6 +154,11 @@ SEARCH_RESULT_FIELDS = (
     "input_voltage",
     "output_voltage",
     "output_current",
+    "lumen_raw",
+    "lumen_unit",
+    "lumen_min",
+    "lumen_max",
+    "lumen_parse_status",
     "spec_summary",
     "manual_alternative_codes",
     "manual_related_codes",
@@ -190,6 +207,12 @@ PRODUCT_V2_SCHEMA = {
         {"name": "ip_rate", "type": "string", "facet": True},
         {"name": "beam_angle", "type": "string", "facet": True},
         {"name": "lumen_output", "type": "string", "optional": True},
+        {"name": "lumen_raw", "type": "string", "optional": True},
+        {"name": "lumen_min", "type": "float", "facet": True, "optional": True},
+        {"name": "lumen_max", "type": "float", "facet": True, "optional": True},
+        {"name": "lumen_unit", "type": "string", "facet": True, "optional": True},
+        {"name": "lumen_values", "type": "float[]", "optional": True},
+        {"name": "lumen_parse_status", "type": "string", "facet": True, "optional": True},
         {"name": "reflector", "type": "string", "optional": True},
         {"name": "mounting", "type": "string", "facet": True},
         {"name": "att_heat_sink", "type": "string", "optional": True},
@@ -248,6 +271,10 @@ PRODUCT_V2_SCHEMA = {
         {"name": "ip_rating_numeric", "type": "float", "facet": True},
         {"name": "stock_bucket", "type": "string", "facet": True},
         {"name": "price_bucket", "type": "string", "facet": True},
+        {"name": "product_star_rating", "type": "float", "facet": True, "optional": True},
+        {"name": "customer_count", "type": "int32", "facet": True, "optional": True},
+        {"name": "total_sold_qty_lifetime", "type": "float", "optional": True},
+        {"name": "is_manufactured_item", "type": "int32", "facet": True, "optional": True},
         {"name": "manual_related_codes", "type": "string[]", "optional": True},
         {"name": "manual_alternative_codes", "type": "string[]", "optional": True},
         {"name": "manual_bought_together_codes", "type": "string[]", "optional": True},
@@ -529,6 +556,9 @@ def compute_product_v2_document(row, related_map=None):
         "sold_last_30_days": flt(row.get("sold_last_30_days")),
         "inventory_value": flt(row.get("inventory_value")),
     }
+
+    lumen_fields = normalize_lumen_fields(row.get("lumen_output"))
+    document.update(lumen_fields)
     document["search_keywords"] = build_search_keywords(document)
     document["spec_summary"] = build_spec_summary(document)
     document["searchable_text"] = build_searchable_text(document)
@@ -596,6 +626,8 @@ def build_filter_by(filters=None, include_inactive=0):
         field_name = key[:-6] if key.endswith("_range") else key
         if field_name in NUMERIC_RANGE_FILTERS:
             clauses.extend(_build_numeric_range_clauses(field_name, value))
+
+    clauses.extend(_build_lumen_clauses(filters))
 
     return " && ".join(clause for clause in clauses if clause)
 
@@ -967,6 +999,16 @@ def parse_search_filters(filters):
 
 def _build_filter_clause(field_name, value):
     if isinstance(value, list):
+        numeric_list_fields = {"is_manufactured_item", "customer_count", "product_star_rating", "total_sold_qty_lifetime"}
+        if field_name in numeric_list_fields:
+            int_fields = {"is_manufactured_item", "customer_count"}
+            if field_name in int_fields:
+                nums = [str(cint(item)) for item in value if item not in (None, "")]
+            else:
+                nums = [str(flt(item)) for item in value if item not in (None, "")]
+            joined = ",".join(nums)
+            return [f"{field_name}:=[{joined}]"] if joined else []
+
         joined = ",".join(f'"{_escape_filter_value(item)}"' for item in value if item not in (None, ""))
         return [f"{field_name}:=[{joined}]"] if joined else []
     if value in (None, ""):
@@ -980,11 +1022,39 @@ def _build_numeric_range_clauses(field_name, value):
     if not isinstance(value, dict):
         return []
     clauses = []
+    int_fields = {"customer_count", "is_manufactured_item"}
+    caster = cint if field_name in int_fields else flt
     if value.get("min") not in (None, ""):
-        clauses.append(f"{field_name}:>={flt(value.get('min'))}")
+        clauses.append(f"{field_name}:>={caster(value.get('min'))}")
     if value.get("max") not in (None, ""):
-        clauses.append(f"{field_name}:<={flt(value.get('max'))}")
+        clauses.append(f"{field_name}:<={caster(value.get('max'))}")
     return clauses
+
+def _build_lumen_clauses(filters):
+    clauses = []
+
+    explicit_clause = build_lumen_overlap_filter(
+        filters.get("lumen_unit"),
+        filters.get("lumen_min"),
+        filters.get("lumen_max"),
+    )
+    if explicit_clause:
+        clauses.append(explicit_clause)
+
+    lumen_ranges = filters.get("lumen_ranges")
+    if isinstance(lumen_ranges, dict):
+        for unit_key, range_data in lumen_ranges.items():
+            if not isinstance(range_data, dict):
+                continue
+            unit_clause = build_lumen_overlap_filter(
+                unit_key, range_data.get("min"), range_data.get("max")
+            )
+            if unit_clause:
+                clauses.append(unit_clause)
+
+    if clauses:
+        return [f"({' || '.join(clauses)})"]
+    return []
 
 
 def _within_band(source_value, candidate_value, tolerance_fraction):
