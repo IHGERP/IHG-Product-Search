@@ -35,6 +35,13 @@ except Exception:  # pragma: no cover
     requests = None
 
 
+def _sanitize_framework_kwargs(kwargs):
+    cleaned = dict(kwargs or {})
+    for key in ("cmd", "data"):
+        cleaned.pop(key, None)
+    return cleaned
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  CART HELPERS  (Redis-backed, per user, 24-hour TTL)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -956,7 +963,6 @@ def get_all_masters(**kwargs):
         as_dict=True,
     )
 
-    # Item-level attribute values
     attr_rows = frappe.db.sql(
         """
         SELECT iav.parent AS attribute, iav.attribute_value AS value
@@ -970,18 +976,42 @@ def get_all_masters(**kwargs):
     for r in attr_rows:
         attributes.setdefault(r.attribute, []).append(r.value)
 
-    # Product intelligence master options for frontend filters.
     star_rating_options = [f"{value:.1f}" for value in [3.5, 3.7, 3.9, 4.1, 4.3, 4.5, 4.7, 4.9, 5.0]]
     happy_customer_options = ["50", "75", "100"]
     manufactured_item_options = ["1", "0"]
 
+    def _facet_values_from_typesense(field_name):
+        try:
+            from igh_search.igh_search.product_search_v2 import create_typesense_client, get_default_collection
+            client = create_typesense_client()
+            response = client.collections[get_default_collection()].documents.search(
+                {
+                    "q": "*",
+                    "query_by": "item_code,item_name,searchable_text",
+                    "facet_by": field_name,
+                    "page": 1,
+                    "per_page": 1,
+                    "max_facet_values": 1000,
+                }
+            )
+            for facet in response.get("facet_counts", []):
+                if facet.get("field_name") == field_name:
+                    return [cstr(c.get("value")).strip() for c in facet.get("counts", []) if cstr(c.get("value")).strip()]
+        except Exception:
+            return []
+        return []
+
     return {
-        "brands":      [b.name for b in brands],
+        "brands": [b.name for b in brands],
         "item_groups": [g.name for g in item_groups],
-        "attributes":  attributes,
+        "attributes": attributes,
         "product_star_rating": star_rating_options,
         "customer_count": happy_customer_options,
         "is_manufactured_item": manufactured_item_options,
+        "lumen_output": _facet_values_from_typesense("lumen_output"),
+        "input_voltage": _facet_values_from_typesense("input_voltage"),
+        "output_current": _facet_values_from_typesense("output_current"),
+        "output_voltage": _facet_values_from_typesense("output_voltage"),
     }
 
 
@@ -1088,28 +1118,28 @@ def get_customer_info(**kwargs):
 @frappe.whitelist(allow_guest=True)
 def search_products_v2(*args, **kwargs):
     from igh_search.igh_search.product_search_v2 import search_products_v2 as _f
-    return _f(*args, **kwargs)
+    return _f(*args, **_sanitize_framework_kwargs(kwargs))
 
 
 @frappe.whitelist(allow_guest=True)
 def suggest_products_v2(*args, **kwargs):
     from igh_search.igh_search.product_search_v2 import suggest_products_v2 as _f
-    return _f(*args, **kwargs)
+    return _f(*args, **_sanitize_framework_kwargs(kwargs))
 
 
 @frappe.whitelist(allow_guest=True)
 def get_similar_products_v2(*args, **kwargs):
     from igh_search.igh_search.product_search_v2 import get_similar_products_v2 as _f
-    return _f(*args, **kwargs)
+    return _f(*args, **_sanitize_framework_kwargs(kwargs))
 
 
 @frappe.whitelist(allow_guest=True)
 def ai_search_products_v2(*args, **kwargs):
     from igh_search.igh_search.product_search_v2 import ai_search_products_v2 as _f
-    return _f(*args, **kwargs)
+    return _f(*args, **_sanitize_framework_kwargs(kwargs))
 
 
 @frappe.whitelist(allow_guest=True)
 def get_typesense_sync_health(*args, **kwargs):
-    from igh_search.igh_search.product_search_v2 import get_typesense_sync_health as _f
-    return _f(*args, **kwargs)
+    from igh_search.igh_search.product_search_v2 import get_sync_health_summary as _f
+    return _f(*args, **_sanitize_framework_kwargs(kwargs))
