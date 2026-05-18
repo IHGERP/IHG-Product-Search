@@ -556,6 +556,10 @@ def compute_product_v2_document(row, related_map=None):
         "stock": flt(row.get("stock")),
         "sold_last_30_days": flt(row.get("sold_last_30_days")),
         "inventory_value": flt(row.get("inventory_value")),
+        "product_star_rating": flt(row.get("product_star_rating") or 3.5),
+        "customer_count": cint(row.get("customer_count") or 0),
+        "total_sold_qty_lifetime": flt(row.get("total_sold_qty_lifetime") or 0),
+        "is_manufactured_item": cint(row.get("is_manufactured_item") or 0),
     }
 
     lumen_fields = normalize_lumen_fields(row.get("lumen_output"))

@@ -2,6 +2,9 @@
 # For license information, please see license.txt
 
 import copy
+import json
+import time
+from collections import defaultdict
 
 import frappe
 import typesense
@@ -142,6 +145,73 @@ def create_client():
     return create_typesense_client()
 
 
+def _log_sync_observability(level, event, payload):
+    logger = frappe.logger("igh_search.typesense_sync")
+    message = f"{event} | {json.dumps(payload, default=str)}"
+    log_fn = getattr(logger, level, logger.info)
+    log_fn(message)
+
+
+def _build_intelligence_stats(v2_docs):
+    docs = v2_docs or []
+    total = len(docs)
+    rating_values = [flt(doc.get("product_star_rating") or 0) for doc in docs]
+    customer_values = [int(doc.get("customer_count") or 0) for doc in docs]
+
+    return {
+        "total_docs": total,
+        "star_rating_positive": sum(1 for value in rating_values if value > 0),
+        "customer_count_positive": sum(1 for value in customer_values if value > 0),
+        "manufactured_true": sum(1 for doc in docs if int(doc.get("is_manufactured_item") or 0) == 1),
+        "star_rating_min": min(rating_values) if rating_values else 0,
+        "star_rating_max": max(rating_values) if rating_values else 0,
+        "star_rating_avg": round((sum(rating_values) / total), 4) if total else 0,
+        "customer_count_min": min(customer_values) if customer_values else 0,
+        "customer_count_max": max(customer_values) if customer_values else 0,
+        "customer_count_avg": round((sum(customer_values) / total), 4) if total else 0,
+    }
+
+
+def _run_post_sync_filter_probes(client, collection_name):
+    probes = [
+        ("product_star_rating:>=3.5", "star_rating_gte_3_5"),
+        ("customer_count:>=1", "customer_count_gte_1"),
+        ("is_manufactured_item:=1", "manufactured_eq_1"),
+    ]
+    results = {}
+    for filter_by, key in probes:
+        try:
+            response = client.collections[collection_name].documents.search(
+                {
+                    "q": "*",
+                    "query_by": "item_code,item_name,searchable_text",
+                    "filter_by": filter_by,
+                    "per_page": 0,
+                    "page": 1,
+                }
+            )
+            results[key] = {
+                "filter_by": filter_by,
+                "found": int(response.get("found") or 0),
+            }
+        except Exception as exc:
+            results[key] = {"filter_by": filter_by, "error": cstr(exc)[:300]}
+    return results
+
+
+def _warn_if_legacy_collection_configured():
+    default_collection = cstr(get_v2_config().get("default_collection") or "").strip()
+    if default_collection == "product":
+        _log_sync_observability(
+            "warning",
+            "collection_mismatch",
+            {
+                "message": "V2 default collection is set to legacy 'product'.",
+                "default_collection": default_collection,
+            },
+        )
+
+
 def sync_items_to_typesense(client):
     log_name = create_sync_log(
         trigger_type="full_sync",
@@ -163,9 +233,12 @@ def sync_items_to_typesense(client):
 
 def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
     client = client or create_client()
+    started_at = time.time()
     update_sync_log(log_name, "Running", retry_count=retry_count, started=True)
 
     try:
+        _warn_if_legacy_collection_configured()
+
         collections = [(product_schema["name"], product_schema)]
         if is_dual_write_enabled():
             collections.append((PRODUCT_V2_COLLECTION, get_product_v2_schema()))
@@ -174,10 +247,46 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
             recreate_collection(client, collection_name, schema)
 
         payload = get_product_schema_data(version="both")
-        import_documents_in_batches(client, product_schema["name"], payload["v1"])
+        v1_result = import_documents_in_batches(client, product_schema["name"], payload["v1"])
+
+        v2_result = {"processed": 0, "failed": 0, "failed_items": []}
+        probe_result = {}
         if is_dual_write_enabled():
-            import_documents_in_batches(client, PRODUCT_V2_COLLECTION, payload["v2"])
+            v2_result = import_documents_in_batches(client, PRODUCT_V2_COLLECTION, payload["v2"])
             sync_typesense_synonyms(client, PRODUCT_V2_COLLECTION)
+            probe_result = _run_post_sync_filter_probes(client, PRODUCT_V2_COLLECTION)
+
+        duration_ms = int((time.time() - started_at) * 1000)
+        intelligence_stats = _build_intelligence_stats(payload.get("v2") or [])
+
+        _log_sync_observability(
+            "info",
+            "full_sync_summary",
+            {
+                "duration_ms": duration_ms,
+                "v1": v1_result,
+                "v2": v2_result,
+                "intelligence": intelligence_stats,
+                "probes": probe_result,
+            },
+        )
+
+        if (v1_result.get("failed") or 0) > 0 or (v2_result.get("failed") or 0) > 0:
+            update_sync_log(
+                log_name,
+                "Failed",
+                retry_count=retry_count,
+                failure_reason=json.dumps(
+                    {
+                        "v1_failures": v1_result.get("failed", 0),
+                        "v2_failures": v2_result.get("failed", 0),
+                        "v1_sample": v1_result.get("failed_items", [])[:5],
+                        "v2_sample": v2_result.get("failed_items", [])[:5],
+                    }
+                )[:100000],
+                finished=True,
+            )
+            frappe.throw("Typesense full sync finished with import failures. Check logs for details.")
 
         frappe.db.set_value(
             "Typesense Settings", "Typesense Settings", "is_sync", 0, update_modified=False
@@ -423,6 +532,98 @@ def _enrich_item_rows(rows, item_price_list_data, sold_last_30_days, item_wise_s
         row["frequently_bought_together"] = ""
 
     enrich_rows_with_item_metadata(rows)
+    enrich_rows_with_product_intelligence(rows)
+
+
+def _calculate_star_rating(total_sold_qty):
+    qty = flt(total_sold_qty or 0)
+    if qty <= 50:
+        return 3.5
+    if qty >= 500:
+        return 5.0
+    rating = 3.5 + ((qty - 50) / 450.0) * 1.5
+    return round(rating, 1)
+
+
+def _fetch_sales_metrics_by_item(item_codes):
+    if not item_codes:
+        return {}
+
+    rows = frappe.db.sql(
+        """
+        SELECT
+            sii.item_code AS item_code,
+            SUM(COALESCE(sii.qty, 0)) AS total_sold_qty,
+            COUNT(DISTINCT si.name) AS invoice_count
+        FROM `tabSales Invoice Item` sii
+        INNER JOIN `tabSales Invoice` si
+            ON si.name = sii.parent
+        WHERE
+            sii.item_code IN %(item_codes)s
+            AND si.docstatus = 1
+            AND COALESCE(si.is_internal_customer, 0) = 0
+        GROUP BY sii.item_code
+        """,
+        {"item_codes": tuple(item_codes)},
+        as_dict=True,
+    )
+
+    metrics = {}
+    for row in rows:
+        qty = flt(row.get("total_sold_qty") or 0)
+        invoices = int(row.get("invoice_count") or 0)
+        metrics[row["item_code"]] = {
+            "total_sold_qty_lifetime": qty,
+            "customer_count": invoices,
+            "product_star_rating": _calculate_star_rating(qty),
+        }
+    return metrics
+
+
+def _fetch_manufactured_item_set(item_codes):
+    if not item_codes:
+        return set()
+
+    rows = frappe.db.sql(
+        """
+        SELECT DISTINCT sed.item_code AS item_code
+        FROM `tabStock Entry Detail` sed
+        INNER JOIN `tabStock Entry` se
+            ON se.name = sed.parent
+        WHERE
+            sed.item_code IN %(item_codes)s
+            AND COALESCE(sed.is_finished_item, 0) = 1
+            AND se.docstatus = 1
+            AND se.stock_entry_type = 'Manufacture'
+        """,
+        {"item_codes": tuple(item_codes)},
+        as_dict=True,
+    )
+    return {row["item_code"] for row in rows if row.get("item_code")}
+
+
+def enrich_rows_with_product_intelligence(rows):
+    item_codes = [cstr(row.get("item_code")).strip() for row in rows if cstr(row.get("item_code")).strip()]
+    if not item_codes:
+        return
+
+    sales_metrics = _fetch_sales_metrics_by_item(item_codes)
+    manufactured_items = _fetch_manufactured_item_set(item_codes)
+
+    for row in rows:
+        item_code = cstr(row.get("item_code")).strip()
+        base = sales_metrics.get(
+            item_code,
+            {
+                "total_sold_qty_lifetime": 0.0,
+                "customer_count": 0,
+                "product_star_rating": _calculate_star_rating(0),
+            },
+        )
+        row["total_sold_qty_lifetime"] = flt(base.get("total_sold_qty_lifetime") or 0)
+        row["customer_count"] = int(base.get("customer_count") or 0)
+        row["product_star_rating"] = flt(base.get("product_star_rating") or 3.5)
+        row["is_manufactured_item"] = 1 if item_code in manufactured_items else 0
 
 
 def build_v1_documents(rows):
@@ -828,10 +1029,40 @@ def recreate_collection(client, collection_name, schema):
 
 
 def import_documents_in_batches(client, collection_name, documents, batch_size=5000):
+    summary = {"processed": 0, "failed": 0, "failed_items": []}
     for index in range(0, len(documents), batch_size):
         batch = documents[index : index + batch_size]
-        if batch:
-            client.collections[collection_name].documents.import_(batch, {"action": "upsert"})
+        if not batch:
+            continue
+
+        raw_response = client.collections[collection_name].documents.import_(
+            batch, {"action": "upsert"}
+        )
+        summary["processed"] += len(batch)
+
+        lines = []
+        if isinstance(raw_response, str):
+            lines = [line for line in raw_response.split("\n") if line.strip()]
+        elif isinstance(raw_response, list):
+            lines = raw_response
+
+        for offset, line in enumerate(lines):
+            try:
+                parsed = line if isinstance(line, dict) else json.loads(line)
+            except Exception:
+                parsed = {"success": False, "error": cstr(line)[:300]}
+
+            if parsed.get("success") is False:
+                summary["failed"] += 1
+                source = batch[offset] if offset < len(batch) else {}
+                summary["failed_items"].append(
+                    {
+                        "item_code": source.get("item_code") or source.get("id"),
+                        "error": cstr(parsed.get("error") or parsed)[:300],
+                    }
+                )
+
+    return summary
 
 
 def normalize_item_codes(item_codes):
