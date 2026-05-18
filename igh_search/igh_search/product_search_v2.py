@@ -163,6 +163,10 @@ SEARCH_RESULT_FIELDS = (
     "spec_summary",
     "manual_alternative_codes",
     "manual_related_codes",
+    "product_star_rating",
+    "customer_count",
+    "total_sold_qty_lifetime",
+    "is_manufactured_item",
 )
 
 PRODUCT_V2_SCHEMA = {
