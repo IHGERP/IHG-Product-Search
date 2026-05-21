@@ -1330,7 +1330,7 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
             family_resolution["value"],
             "family_match",
             confidence=0.95,
-            hard=False,
+            hard=True,
         )
 
     if page_context.get("brand"):
