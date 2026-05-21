@@ -1141,7 +1141,7 @@ def get_similar_products_v2(*args, **kwargs):
 
 @frappe.whitelist(allow_guest=True)
 def ai_search_products_v2(*args, **kwargs):
-    from igh_search.igh_search.ai_product_search import ai_search_products_v2 as _f
+    from igh_search.igh_search.product_search_v2 import ai_search_products_v2 as _f
     return _f(*args, **_sanitize_framework_kwargs(kwargs))
 
 
