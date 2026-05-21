@@ -913,17 +913,20 @@ def get_sales_dashboard_reports(**kwargs):
         SELECT
             sii.item_code AS item_code,
             COALESCE(sii.item_name, sii.item_code) AS item_name,
+            COALESCE(it.image, '') AS image,
             SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.qty, 0))) AS net_qty,
             SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.net_amount, sii.amount, 0))) AS net_value,
             SUM(CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) AS line_occurrences
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si
             ON si.name = sii.parent
+        LEFT JOIN `tabItem` it
+            ON it.item_code = sii.item_code
         WHERE
             si.docstatus = 1
             AND TIMESTAMP(si.posting_date, COALESCE(si.posting_time, '00:00:00')) >= %(today_start)s
             AND TIMESTAMP(si.posting_date, COALESCE(si.posting_time, '00:00:00')) <= %(now_ts)s
-        GROUP BY sii.item_code, COALESCE(sii.item_name, sii.item_code)
+        GROUP BY sii.item_code, COALESCE(sii.item_name, sii.item_code), COALESCE(it.image, ''), COALESCE(it.image, '')
         HAVING SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.qty, 0))) > 0
         ORDER BY net_qty DESC, net_value DESC
         LIMIT 10
@@ -937,17 +940,20 @@ def get_sales_dashboard_reports(**kwargs):
         SELECT
             sii.item_code AS item_code,
             COALESCE(sii.item_name, sii.item_code) AS item_name,
+            COALESCE(it.image, '') AS image,
             SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.qty, 0))) AS net_qty,
             SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.net_amount, sii.amount, 0))) AS net_value,
             SUM(CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) AS line_occurrences
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si
             ON si.name = sii.parent
+        LEFT JOIN `tabItem` it
+            ON it.item_code = sii.item_code
         WHERE
             si.docstatus = 1
             AND TIMESTAMP(si.posting_date, COALESCE(si.posting_time, '00:00:00')) >= %(month_start)s
             AND TIMESTAMP(si.posting_date, COALESCE(si.posting_time, '00:00:00')) <= %(now_ts)s
-        GROUP BY sii.item_code, COALESCE(sii.item_name, sii.item_code)
+        GROUP BY sii.item_code, COALESCE(sii.item_name, sii.item_code), COALESCE(it.image, ''), COALESCE(it.image, '')
         HAVING SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.qty, 0))) > 0
         ORDER BY line_occurrences DESC, net_qty DESC, net_value DESC
         LIMIT 10
@@ -961,17 +967,20 @@ def get_sales_dashboard_reports(**kwargs):
         SELECT
             sii.item_code AS item_code,
             COALESCE(sii.item_name, sii.item_code) AS item_name,
+            COALESCE(it.image, '') AS image,
             SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.qty, 0))) AS net_qty,
             SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.net_amount, sii.amount, 0))) AS net_value,
             SUM(CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) AS line_occurrences
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si
             ON si.name = sii.parent
+        LEFT JOIN `tabItem` it
+            ON it.item_code = sii.item_code
         WHERE
             si.docstatus = 1
             AND TIMESTAMP(si.posting_date, COALESCE(si.posting_time, '00:00:00')) >= %(month_start)s
             AND TIMESTAMP(si.posting_date, COALESCE(si.posting_time, '00:00:00')) <= %(now_ts)s
-        GROUP BY sii.item_code, COALESCE(sii.item_name, sii.item_code)
+        GROUP BY sii.item_code, COALESCE(sii.item_name, sii.item_code), COALESCE(it.image, ''), COALESCE(it.image, '')
         HAVING SUM((CASE WHEN COALESCE(si.is_return, 0) = 1 THEN -1 ELSE 1 END) * ABS(COALESCE(sii.qty, 0))) > 0
         ORDER BY net_qty DESC, line_occurrences DESC, net_value DESC
         LIMIT 10
@@ -985,19 +994,22 @@ def get_sales_dashboard_reports(**kwargs):
         SELECT
             sii.item_code AS item_code,
             COALESCE(sii.item_name, sii.item_code) AS item_name,
+            COALESCE(it.image, '') AS image,
             SUM(ABS(COALESCE(sii.qty, 0))) AS return_qty,
             SUM(ABS(COALESCE(sii.net_amount, sii.amount, 0))) AS return_value,
             COUNT(*) AS return_lines
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si
             ON si.name = sii.parent
+        LEFT JOIN `tabItem` it
+            ON it.item_code = sii.item_code
         WHERE
             si.docstatus = 1
             AND COALESCE(si.is_return, 0) = 1
             AND COALESCE(si.update_stock, 0) = 1
             AND TIMESTAMP(si.posting_date, COALESCE(si.posting_time, '00:00:00')) >= %(week_start)s
             AND TIMESTAMP(si.posting_date, COALESCE(si.posting_time, '00:00:00')) <= %(now_ts)s
-        GROUP BY sii.item_code, COALESCE(sii.item_name, sii.item_code)
+        GROUP BY sii.item_code, COALESCE(sii.item_name, sii.item_code), COALESCE(it.image, ''), COALESCE(it.image, '')
         ORDER BY return_qty DESC, return_value DESC
         LIMIT 10
         """,
@@ -1010,17 +1022,20 @@ def get_sales_dashboard_reports(**kwargs):
         SELECT
             pri.item_code AS item_code,
             COALESCE(pri.item_name, pri.item_code) AS item_name,
+            COALESCE(it.image, '') AS image,
             SUM(ABS(COALESCE(pri.qty, 0))) AS received_qty,
             SUM(ABS(COALESCE(pri.amount, 0))) AS received_value,
             COUNT(*) AS receipt_lines
         FROM `tabPurchase Receipt Item` pri
         INNER JOIN `tabPurchase Receipt` pr
             ON pr.name = pri.parent
+        LEFT JOIN `tabItem` it
+            ON it.item_code = pri.item_code
         WHERE
             pr.docstatus = 1
             AND TIMESTAMP(pr.posting_date, COALESCE(pr.posting_time, '00:00:00')) >= %(week_start)s
             AND TIMESTAMP(pr.posting_date, COALESCE(pr.posting_time, '00:00:00')) <= %(now_ts)s
-        GROUP BY pri.item_code, COALESCE(pri.item_name, pri.item_code)
+        GROUP BY pri.item_code, COALESCE(pri.item_name, pri.item_code), COALESCE(it.image, '')
         ORDER BY received_qty DESC, received_value DESC
         LIMIT 10
         """,
