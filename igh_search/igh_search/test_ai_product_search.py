@@ -22,9 +22,9 @@ from igh_search.igh_search.ai_product_search import (
 VOCABULARY = {
     "known_values": {
         "brand": ["LUMIBRIGHT", "ACME"],
-        "category_list": ["Outdoor Lighting", "Office Lighting", "Downlight"],
+        "category_list": ["Outdoor Lighting", "Office Lighting", "Downlight", "SPOT LIGHT"],
         "product_type": ["Listed", "Unlisted", "Obsolete"],
-        "item_group": ["Outdoor Lighting", "Drivers", "Downlight"],
+        "item_group": ["Outdoor Lighting", "Drivers", "Downlight", "SPOT LIGHT"],
         "ip_rate": ["IP65", "IP66"],
         "power": ["6W", "12W", "50W"],
         "color_temp": ["3000K", "4000K"],
@@ -170,7 +170,7 @@ class TestAIProductSearch(FrappeTestCase):
         self.assertEqual(intent["filters"]["power_value_range"]["max"], 20.0)
         self.assertEqual(intent["filters"]["power_value_range"]["min"], 0)
         self.assertIn("3000K", intent["filters"]["color_temp"])
-        self.assertEqual(intent["query"], "downlights")
+        self.assertEqual(intent["query"], "")
 
     def test_extract_deterministic_intent_keeps_exact_power_without_comparator(self):
         preprocessed = preprocess_user_message("20w downlight")
@@ -179,6 +179,37 @@ class TestAIProductSearch(FrappeTestCase):
         self.assertEqual(intent["filters"]["power"], ["20W"])
         self.assertEqual(intent["filters"]["power_value_range"]["min"], 18.0)
         self.assertEqual(intent["filters"]["power_value_range"]["max"], 22.0)
+
+    def test_extract_deterministic_intent_maps_family_to_category_and_cleans_query(self):
+        preprocessed = preprocess_user_message("3000k spotlights")
+        intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+
+        self.assertIn("3000K", intent["filters"]["color_temp"])
+        self.assertIn("SPOT LIGHT", intent["filters"]["category_list"])
+        self.assertEqual(intent["query"], "")
+
+    def test_extract_deterministic_intent_maps_family_variants_to_category(self):
+        for message in ("3000k spot light", "3000k spot-light", "3000k spotlights"):
+            preprocessed = preprocess_user_message(message)
+            intent = extract_deterministic_intent(preprocessed, VOCABULARY)
+            self.assertIn("SPOT LIGHT", intent["filters"]["category_list"])
+            self.assertEqual(intent["query"], "")
+
+    def test_extract_deterministic_intent_falls_back_to_query_when_category_ambiguous(self):
+        ambiguous_vocab = {
+            **VOCABULARY,
+            "known_values": {
+                **VOCABULARY["known_values"],
+                "category_list": ["SPOT LIGHT", "SPOTLIGHT"],
+                "item_group": ["Lighting"],
+            },
+        }
+        preprocessed = preprocess_user_message("3000k spotlights")
+        intent = extract_deterministic_intent(preprocessed, ambiguous_vocab)
+
+        self.assertEqual(intent["filters"]["category_list"], [])
+        self.assertEqual(intent["filters"]["item_group"], [])
+        self.assertEqual(intent["query"], "spotlights")
 
     def test_extract_deterministic_intent_parses_price_comparatives(self):
         preprocessed = preprocess_user_message("strip lights between 20 and 50 aed")
@@ -190,20 +221,20 @@ class TestAIProductSearch(FrappeTestCase):
         intent = extract_deterministic_intent(preprocessed, VOCABULARY)
         self.assertEqual(intent["filters"]["rate_range"]["min"], 100.0)
         self.assertEqual(intent["filters"]["rate_range"]["max"], 1000000000)
-        self.assertEqual(intent["query"], "spotlights")
+        self.assertEqual(intent["query"], "")
 
     def test_extract_deterministic_intent_parses_stock_comparatives(self):
         preprocessed = preprocess_user_message("drivers stock above 10 qty")
         intent = extract_deterministic_intent(preprocessed, VOCABULARY)
         self.assertEqual(intent["filters"]["stock_range"]["min"], 10.0)
         self.assertEqual(intent["filters"]["stock_range"]["max"], 1000000000)
-        self.assertEqual(intent["query"], "drivers")
+        self.assertEqual(intent["query"], "")
 
         preprocessed = preprocess_user_message("drivers stock below 10 qty")
         intent = extract_deterministic_intent(preprocessed, VOCABULARY)
         self.assertEqual(intent["filters"]["stock_range"]["min"], 0)
         self.assertEqual(intent["filters"]["stock_range"]["max"], 10.0)
-        self.assertEqual(intent["query"], "drivers")
+        self.assertEqual(intent["query"], "")
 
     def test_extract_deterministic_intent_does_not_misclassify_ambiguous_between(self):
         preprocessed = preprocess_user_message("between 20 and 50 downlight")

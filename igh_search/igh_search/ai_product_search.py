@@ -906,6 +906,119 @@ def _normalize_allowed_lookup(known_values):
     return lookup
 
 
+def _normalize_family_token(value):
+    normalized = normalize_text(value)
+    if not normalized:
+        return ""
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    if compact.endswith("ies") and len(compact) > 4:
+        compact = f"{compact[:-3]}y"
+    elif compact.endswith("s") and len(compact) > 3:
+        compact = compact[:-1]
+    return compact
+
+
+def _extract_family_phrase_candidates(normalized_message):
+    words = [word for word in cstr(normalized_message or "").split(" ") if word]
+    phrases = set(words)
+    for size in (2, 3):
+        for idx in range(0, max(len(words) - size + 1, 0)):
+            phrases.add(" ".join(words[idx : idx + size]))
+    return {phrase for phrase in phrases if phrase}
+
+
+def _iter_known_values_for_family(field_values):
+    if isinstance(field_values, dict):
+        return field_values.values()
+    if isinstance(field_values, (list, tuple, set)):
+        return field_values
+    return []
+
+
+def _build_family_lookup(known_lookup):
+    category_map = defaultdict(set)
+    item_group_map = defaultdict(set)
+
+    def add_value(target, raw_value):
+        cleaned = cstr(raw_value).strip()
+        token = _normalize_family_token(cleaned)
+        if cleaned and token:
+            target[token].add(cleaned)
+
+    for value in _iter_known_values_for_family((known_lookup or {}).get("category_list")):
+        add_value(category_map, value)
+    for value in _iter_known_values_for_family((known_lookup or {}).get("item_group")):
+        add_value(item_group_map, value)
+
+    alias_map = get_alias_map() or {}
+    for alias, canonical in alias_map.items():
+        alias_token = _normalize_family_token(alias)
+        canonical_token = _normalize_family_token(canonical)
+        if not alias_token or not canonical_token:
+            continue
+        for category_value in category_map.get(canonical_token, set()):
+            category_map[alias_token].add(category_value)
+        for item_group_value in item_group_map.get(canonical_token, set()):
+            item_group_map[alias_token].add(item_group_value)
+
+    return category_map, item_group_map
+
+
+def _resolve_family_match(normalized_message, known_lookup):
+    phrases = _extract_family_phrase_candidates(normalized_message)
+    category_map, item_group_map = _build_family_lookup(known_lookup)
+
+    category_hits = set()
+    item_group_hits = set()
+    matched_phrases = []
+
+    for phrase in phrases:
+        token = _normalize_family_token(phrase)
+        if not token:
+            continue
+        category_candidates = category_map.get(token, set())
+        item_group_candidates = item_group_map.get(token, set())
+        if category_candidates or item_group_candidates:
+            matched_phrases.append(phrase)
+        category_hits.update(category_candidates)
+        item_group_hits.update(item_group_candidates)
+
+    if len(category_hits) == 1:
+        return {
+            "filter_key": "category_list",
+            "value": sorted(category_hits)[0],
+            "matched_phrases": matched_phrases,
+            "signal": "family_match:category_list",
+        }
+
+    if not category_hits and len(item_group_hits) == 1:
+        return {
+            "filter_key": "item_group",
+            "value": sorted(item_group_hits)[0],
+            "matched_phrases": matched_phrases,
+            "signal": "family_match:item_group_fallback",
+        }
+
+    return {
+        "filter_key": "",
+        "value": "",
+        "matched_phrases": matched_phrases,
+        "signal": "family_match:none",
+    }
+
+
+def _remove_matched_family_phrases(query_text, matched_phrases):
+    cleaned = cstr(query_text or "")
+    for phrase in sorted(
+        {cstr(value or "").strip() for value in matched_phrases if cstr(value or "").strip()},
+        key=len,
+        reverse=True,
+    ):
+        cleaned = re.sub(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def _extract_sku_hint(normalized_message):
     candidates = re.findall(r"\b[a-z0-9]+(?:[-_/][a-z0-9]+)+\b|\b[a-z]*\d[a-z0-9-]{2,}\b", normalized_message)
     for candidate in candidates:
@@ -1027,6 +1140,8 @@ def _extract_additional_specs(intent, preprocessed_message):
 def _match_known_values(normalized_message, known_values):
     matches = {}
     for filter_key, values in (known_values or {}).items():
+        if filter_key in {"category_list", "item_group"}:
+            continue
         for normalized_value, canonical_value in values.items():
             if not normalized_value:
                 continue
@@ -1202,6 +1317,22 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
         for value in values[:3]:
             _add_filter_value(intent, filter_key, value, "vocabulary", confidence=0.9, hard=False)
 
+    family_resolution = _resolve_family_match(
+        normalized_message,
+        vocabulary.get("known_values") or {},
+    )
+    if family_resolution.get("signal"):
+        _add_signal(intent, family_resolution["signal"])
+    if family_resolution.get("filter_key") and family_resolution.get("value"):
+        _add_filter_value(
+            intent,
+            family_resolution["filter_key"],
+            family_resolution["value"],
+            "family_match",
+            confidence=0.95,
+            hard=False,
+        )
+
     if page_context.get("brand"):
         _add_filter_value(intent, "brand", page_context["brand"], "page_context", confidence=0.6, hard=False)
     if page_context.get("category"):
@@ -1217,6 +1348,10 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
             query_candidate = re.sub(pattern, " ", query_candidate)
     for value in re.findall(r"\b(?:ip\s*\d+|\d+(?:\.\d+)?\s*w|\d{4,5}\s*k)\b", normalized_message):
         query_candidate = re.sub(re.escape(value), " ", query_candidate)
+    query_candidate = _remove_matched_family_phrases(
+        query_candidate,
+        (family_resolution.get("matched_phrases") or []) if family_resolution.get("filter_key") else [],
+    )
     query_candidate = re.sub(r"\s+", " ", query_candidate).strip()
     if intent["intent_class"] != "sku_lookup" and query_candidate:
         _set_query(intent, query_candidate, "message")
