@@ -88,6 +88,11 @@ def get_recent_quotations(*args, **kwargs):
     return _impl().get_recent_quotations(*args, **_sanitize_framework_kwargs(kwargs))
 
 
+@frappe.whitelist(methods=['POST'])
+def get_sales_dashboard_reports(*args, **kwargs):
+    return _impl().get_sales_dashboard_reports(*args, **_sanitize_framework_kwargs(kwargs))
+
+
 @frappe.whitelist(allow_guest=True)
 def get_all_masters(*args, **kwargs):
     return _impl().get_all_masters(*args, **_sanitize_framework_kwargs(kwargs))
