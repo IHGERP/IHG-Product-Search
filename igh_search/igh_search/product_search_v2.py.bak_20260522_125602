@@ -346,7 +346,14 @@ def ensure_query_access(feature_flag_override=0):
     if frappe.session.user == "Guest":
         frappe.throw(_("Authentication required"))
 
-    if not is_query_enabled() and not cint(feature_flag_override):
+    roles = set(frappe.get_roles())
+    allowed_roles = set(get_v2_config()["query_roles"])
+    if not roles.intersection(allowed_roles):
+        frappe.throw(_("You are not permitted to access product search V2"))
+
+    if not is_query_enabled() and not (
+        cint(feature_flag_override) and "System Manager" in roles
+    ):
         frappe.throw(_("Product search V2 is not enabled"))
 
 
