@@ -212,6 +212,16 @@ def _warn_if_legacy_collection_configured():
         )
 
 
+def _get_v2_sync_collections():
+    collections = [PRODUCT_V2_COLLECTION]
+    configured_default = cstr(
+        get_v2_config().get("default_collection") or PRODUCT_V2_COLLECTION
+    ).strip() or PRODUCT_V2_COLLECTION
+    if configured_default not in collections:
+        collections.append(configured_default)
+    return collections
+
+
 def sync_items_to_typesense(client):
     log_name = create_sync_log(
         trigger_type="full_sync",
@@ -240,8 +250,13 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
         _warn_if_legacy_collection_configured()
 
         collections = [(product_schema["name"], product_schema)]
+        v2_collections = []
         if is_dual_write_enabled():
-            collections.append((PRODUCT_V2_COLLECTION, get_product_v2_schema()))
+            v2_collections = _get_v2_sync_collections()
+            for collection_name in v2_collections:
+                schema = get_product_v2_schema()
+                schema["name"] = collection_name
+                collections.append((collection_name, schema))
 
         for collection_name, schema in collections:
             recreate_collection(client, collection_name, schema)
@@ -252,9 +267,31 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
         v2_result = {"processed": 0, "failed": 0, "failed_items": []}
         probe_result = {}
         if is_dual_write_enabled():
-            v2_result = import_documents_in_batches(client, PRODUCT_V2_COLLECTION, payload["v2"])
-            sync_typesense_synonyms(client, PRODUCT_V2_COLLECTION)
-            probe_result = _run_post_sync_filter_probes(client, PRODUCT_V2_COLLECTION)
+            v2_collection_results = {}
+            failed_items = []
+            for collection_name in v2_collections:
+                collection_result = import_documents_in_batches(
+                    client, collection_name, payload["v2"]
+                )
+                sync_typesense_synonyms(client, collection_name)
+                probe_result[collection_name] = _run_post_sync_filter_probes(
+                    client, collection_name
+                )
+                v2_collection_results[collection_name] = collection_result
+                failed_items.extend(collection_result.get("failed_items", []))
+
+            v2_result = {
+                "processed": sum(
+                    cint(result.get("processed") or 0)
+                    for result in v2_collection_results.values()
+                ),
+                "failed": sum(
+                    cint(result.get("failed") or 0)
+                    for result in v2_collection_results.values()
+                ),
+                "failed_items": failed_items[:50],
+                "collections": v2_collection_results,
+            }
 
         duration_ms = int((time.time() - started_at) * 1000)
         intelligence_stats = _build_intelligence_stats(payload.get("v2") or [])

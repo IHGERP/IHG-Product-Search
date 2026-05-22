@@ -24,7 +24,7 @@ from datetime import timedelta
 
 import frappe
 from frappe import _
-from frappe.utils import flt, cstr, getdate, nowdate, now_datetime
+from frappe.utils import flt, cint, cstr, getdate, nowdate, now_datetime
 from igh_search.igh_search.lumen_normalization import (
     build_lumen_overlap_filter,
     normalize_lumen_fields,
@@ -1213,6 +1213,470 @@ def get_product_info(item_code=None, **kwargs):
 @frappe.whitelist()
 def get_product_details(item_code=None, **kwargs):
     return get_product_info(item_code=item_code, **kwargs)
+
+
+def _safe_int(value, default=0, minimum=0, maximum=200):
+    try:
+        number = int(value)
+    except Exception:
+        number = default
+    if number < minimum:
+        return minimum
+    if number > maximum:
+        return maximum
+    return number
+
+
+def _unique_codes(values):
+    seen = set()
+    ordered = []
+    for value in values or []:
+        code = cstr(value).strip()
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        ordered.append(code)
+    return ordered
+
+
+def _fetch_item_cards(item_codes):
+    ordered_codes = _unique_codes(item_codes)
+    if not ordered_codes:
+        return []
+
+    docs_by_code = {}
+    try:
+        from igh_search.igh_search.product_search_v2 import get_documents_by_codes
+
+        for doc in get_documents_by_codes(ordered_codes, include_inactive=1) or []:
+            code = cstr(doc.get("item_code")).strip()
+            if code:
+                docs_by_code[code] = doc
+    except Exception:
+        docs_by_code = {}
+
+    fallback_rows = frappe.db.sql(
+        """
+        SELECT
+            item_code,
+            item_name,
+            brand,
+            item_group,
+            category_list,
+            series,
+            image,
+            stock_uom
+        FROM `tabItem`
+        WHERE item_code IN %(codes)s
+        """,
+        {"codes": tuple(ordered_codes)},
+        as_dict=True,
+    )
+    fallback_by_code = {cstr(row.get("item_code")): row for row in fallback_rows}
+
+    cards = []
+    for code in ordered_codes:
+        doc = docs_by_code.get(code, {})
+        fallback = fallback_by_code.get(code, {})
+
+        item_name = cstr(doc.get("item_name") or fallback.get("item_name") or code)
+        brand = cstr(doc.get("brand") or fallback.get("brand") or "")
+        item_group = cstr(doc.get("item_group") or fallback.get("item_group") or "")
+        category_list = cstr(doc.get("category_list") or fallback.get("category_list") or item_group)
+        series = cstr(doc.get("series") or fallback.get("series") or "")
+        image = cstr(doc.get("image") or doc.get("website_image_url") or fallback.get("image") or "")
+        stock_uom = cstr(doc.get("stock_uom") or fallback.get("stock_uom") or "Nos")
+        rate = flt(doc.get("rate") or 0)
+        offer_rate = flt(doc.get("offer_rate") or 0)
+        stock = flt(doc.get("stock") or 0)
+        in_stock = int(
+            doc.get("in_stock")
+            if doc.get("in_stock") is not None
+            else (1 if stock > 0 else 0)
+        )
+
+        cards.append(
+            {
+                "item_code": code,
+                "item_name": item_name,
+                "brand": brand,
+                "item_group": item_group,
+                "category_list": category_list,
+                "series": series,
+                "image": image,
+                "website_image_url": image,
+                "stock_uom": stock_uom,
+                "rate": rate,
+                "offer_rate": offer_rate,
+                "stock": stock,
+                "in_stock": in_stock,
+            }
+        )
+
+    return cards
+
+
+def _query_related_codes_by_field(field_name, field_value, current_code, preview_limit):
+    if field_name not in ("category_list", "item_group", "series"):
+        return {"total": 0, "codes": []}
+
+    cleaned_value = cstr(field_value).strip()
+    if not cleaned_value:
+        return {"total": 0, "codes": []}
+
+    total_row = frappe.db.sql(
+        f"""
+        SELECT COUNT(*) AS total
+        FROM `tabItem`
+        WHERE disabled = 0
+          AND item_code != %(item_code)s
+          AND IFNULL(TRIM({field_name}), '') = %(value)s
+        """,
+        {"item_code": current_code, "value": cleaned_value},
+        as_dict=True,
+    )
+    total = cint((total_row[0] or {}).get("total") if total_row else 0)
+
+    rows = frappe.db.sql(
+        f"""
+        SELECT item_code
+        FROM `tabItem`
+        WHERE disabled = 0
+          AND item_code != %(item_code)s
+          AND IFNULL(TRIM({field_name}), '') = %(value)s
+        ORDER BY modified DESC
+        LIMIT %(limit)s
+        """,
+        {"item_code": current_code, "value": cleaned_value, "limit": preview_limit},
+        as_dict=True,
+    )
+    codes = [cstr(row.get("item_code")) for row in rows]
+    return {"total": total, "codes": _unique_codes(codes)}
+
+
+@frappe.whitelist(allow_guest=True)
+def get_product_related_context(item_code=None, preview_limit=8, **kwargs):
+    current_code = cstr(item_code).strip()
+    if not current_code:
+        return {"status": "error", "message": "item_code is required"}
+
+    preview_limit = _safe_int(preview_limit, default=8, minimum=1, maximum=40)
+
+    item = frappe.db.get_value(
+        "Item",
+        current_code,
+        ["item_code", "item_name", "item_group", "category_list", "series"],
+        as_dict=True,
+    )
+    if not item:
+        return {"status": "error", "message": f"Item '{current_code}' not found"}
+
+    category_value = cstr(item.get("category_list") or "").strip()
+    category_field = "category_list"
+    if not category_value:
+        category_value = cstr(item.get("item_group") or "").strip()
+        category_field = "item_group"
+
+    category_result = _query_related_codes_by_field(
+        category_field, category_value, current_code, preview_limit
+    )
+    series_value = cstr(item.get("series") or "").strip()
+    series_result = _query_related_codes_by_field(
+        "series", series_value, current_code, preview_limit
+    )
+
+    bundle_parent_rows = frappe.db.sql(
+        """
+        SELECT DISTINCT pb.new_item_code AS item_code
+        FROM `tabProduct Bundle Item` pbi
+        INNER JOIN `tabProduct Bundle` pb
+            ON pb.name = pbi.parent
+        WHERE pbi.item_code = %(item_code)s
+          AND IFNULL(pb.disabled, 0) = 0
+          AND pb.docstatus < 2
+          AND IFNULL(TRIM(pb.new_item_code), '') != ''
+          AND pb.new_item_code != %(item_code)s
+        ORDER BY pb.new_item_code
+        """,
+        {"item_code": current_code},
+        as_dict=True,
+    )
+    bundle_parent_codes = _unique_codes([row.get("item_code") for row in bundle_parent_rows])
+
+    bundle_sibling_rows = frappe.db.sql(
+        """
+        SELECT DISTINCT pbi2.item_code
+        FROM `tabProduct Bundle Item` pbi
+        INNER JOIN `tabProduct Bundle` pb
+            ON pb.name = pbi.parent
+        INNER JOIN `tabProduct Bundle Item` pbi2
+            ON pbi2.parent = pb.name
+        WHERE pbi.item_code = %(item_code)s
+          AND pbi2.item_code != %(item_code)s
+          AND IFNULL(pb.disabled, 0) = 0
+          AND pb.docstatus < 2
+        ORDER BY pbi2.item_code
+        """,
+        {"item_code": current_code},
+        as_dict=True,
+    )
+    bundle_sibling_codes = _unique_codes([row.get("item_code") for row in bundle_sibling_rows])
+
+    manufacture_preview_rows = frappe.db.sql(
+        """
+        SELECT
+            sed.item_code,
+            SUM(ABS(COALESCE(sed.qty, 0))) AS total_qty,
+            COUNT(DISTINCT se.name) AS stock_entry_count
+        FROM `tabStock Entry` se
+        INNER JOIN `tabStock Entry Detail` target
+            ON target.parent = se.name
+        INNER JOIN `tabStock Entry Detail` sed
+            ON sed.parent = se.name
+        WHERE se.docstatus = 1
+          AND se.stock_entry_type = 'Manufacture'
+          AND target.item_code = %(item_code)s
+          AND sed.item_code != %(item_code)s
+        GROUP BY sed.item_code
+        ORDER BY stock_entry_count DESC, total_qty DESC, sed.item_code ASC
+        LIMIT %(limit)s
+        """,
+        {"item_code": current_code, "limit": preview_limit},
+        as_dict=True,
+    )
+    manufacture_total_items_row = frappe.db.sql(
+        """
+        SELECT COUNT(DISTINCT sed.item_code) AS total_items
+        FROM `tabStock Entry` se
+        INNER JOIN `tabStock Entry Detail` target
+            ON target.parent = se.name
+        INNER JOIN `tabStock Entry Detail` sed
+            ON sed.parent = se.name
+        WHERE se.docstatus = 1
+          AND se.stock_entry_type = 'Manufacture'
+          AND target.item_code = %(item_code)s
+          AND sed.item_code != %(item_code)s
+        """,
+        {"item_code": current_code},
+        as_dict=True,
+    )
+    manufacture_total_entries_row = frappe.db.sql(
+        """
+        SELECT COUNT(DISTINCT se.name) AS total_entries
+        FROM `tabStock Entry` se
+        INNER JOIN `tabStock Entry Detail` sed
+            ON sed.parent = se.name
+        WHERE se.docstatus = 1
+          AND se.stock_entry_type = 'Manufacture'
+          AND sed.item_code = %(item_code)s
+        """,
+        {"item_code": current_code},
+        as_dict=True,
+    )
+
+    manufacture_preview_codes = _unique_codes(
+        [row.get("item_code") for row in manufacture_preview_rows]
+    )
+    manufacture_cards = _fetch_item_cards(manufacture_preview_codes)
+    manufacture_stats = {
+        cstr(row.get("item_code")): {
+            "manufacture_total_qty": flt(row.get("total_qty") or 0),
+            "manufacture_stock_entry_count": cint(row.get("stock_entry_count") or 0),
+        }
+        for row in manufacture_preview_rows
+    }
+    for card in manufacture_cards:
+        card.update(manufacture_stats.get(cstr(card.get("item_code")), {}))
+
+    return {
+        "status": "success",
+        "item_code": current_code,
+        "item_name": cstr(item.get("item_name") or current_code),
+        "category_filter_field": category_field,
+        "category_filter_value": category_value,
+        "series_filter_value": series_value,
+        "related_category": {
+            "filter_field": category_field,
+            "value": category_value,
+            "total": cint(category_result.get("total") or 0),
+            "items": _fetch_item_cards(category_result.get("codes") or []),
+        },
+        "related_series": {
+            "filter_field": "series",
+            "value": series_value,
+            "total": cint(series_result.get("total") or 0),
+            "items": _fetch_item_cards(series_result.get("codes") or []),
+        },
+        "bundle_parent_products": {
+            "total": len(bundle_parent_codes),
+            "items": _fetch_item_cards(bundle_parent_codes[:preview_limit]),
+        },
+        "bundle_sibling_components": {
+            "total": len(bundle_sibling_codes),
+            "items": _fetch_item_cards(bundle_sibling_codes[:preview_limit]),
+        },
+        "manufacture_preview": {
+            "total_stock_entries": cint(
+                (manufacture_total_entries_row[0] or {}).get("total_entries")
+                if manufacture_total_entries_row
+                else 0
+            ),
+            "total_distinct_items": cint(
+                (manufacture_total_items_row[0] or {}).get("total_items")
+                if manufacture_total_items_row
+                else 0
+            ),
+            "items": manufacture_cards,
+        },
+    }
+
+
+@frappe.whitelist(allow_guest=True)
+def get_product_manufacture_items(item_code=None, page=1, page_length=20, **kwargs):
+    current_code = cstr(item_code).strip()
+    if not current_code:
+        return {"status": "error", "message": "item_code is required"}
+
+    page = _safe_int(page, default=1, minimum=1, maximum=100000)
+    page_length = _safe_int(page_length, default=20, minimum=1, maximum=100)
+
+    entry_rows = frappe.db.sql(
+        """
+        SELECT
+            se.name,
+            se.posting_date,
+            se.posting_time
+        FROM `tabStock Entry` se
+        INNER JOIN `tabStock Entry Detail` sed
+            ON sed.parent = se.name
+        WHERE se.docstatus = 1
+          AND se.stock_entry_type = 'Manufacture'
+          AND sed.item_code = %(item_code)s
+        GROUP BY se.name, se.posting_date, se.posting_time
+        ORDER BY se.posting_date DESC, se.posting_time DESC, se.name DESC
+        """,
+        {"item_code": current_code},
+        as_dict=True,
+    )
+
+    total_entries = len(entry_rows)
+    total_pages = (total_entries + page_length - 1) // page_length if total_entries else 0
+    if total_pages and page > total_pages:
+        page = total_pages
+    start = (page - 1) * page_length
+    paged_entries = entry_rows[start : start + page_length]
+
+    if not paged_entries:
+        return {
+            "status": "success",
+            "item_code": current_code,
+            "pagination": {
+                "page": page,
+                "page_length": page_length,
+                "total_entries": total_entries,
+                "total_pages": total_pages,
+                "has_next": False,
+                "has_prev": page > 1,
+            },
+            "entries": [],
+            "summary": {
+                "total_distinct_items": 0,
+                "total_stock_entries": total_entries,
+            },
+        }
+
+    entry_names = [row.get("name") for row in paged_entries if row.get("name")]
+
+    detail_rows = frappe.db.sql(
+        """
+        SELECT
+            sed.parent AS stock_entry,
+            sed.item_code,
+            COALESCE(sed.item_name, it.item_name, sed.item_code) AS item_name,
+            sed.qty,
+            COALESCE(sed.is_finished_item, 0) AS is_finished_item,
+            sed.idx
+        FROM `tabStock Entry Detail` sed
+        LEFT JOIN `tabItem` it
+            ON it.item_code = sed.item_code
+        WHERE sed.parent IN %(parents)s
+          AND sed.item_code != %(item_code)s
+        ORDER BY sed.parent, sed.idx
+        """,
+        {"parents": tuple(entry_names), "item_code": current_code},
+        as_dict=True,
+    )
+
+    all_codes = _unique_codes([row.get("item_code") for row in detail_rows])
+    card_map = {card.get("item_code"): card for card in _fetch_item_cards(all_codes)}
+
+    grouped = {}
+    for row in detail_rows:
+        parent = cstr(row.get("stock_entry"))
+        grouped.setdefault(parent, [])
+        code = cstr(row.get("item_code"))
+        base = dict(
+            card_map.get(code)
+            or {"item_code": code, "item_name": cstr(row.get("item_name") or code)}
+        )
+        base.update(
+            {
+                "qty": flt(row.get("qty") or 0),
+                "is_finished_item": cint(row.get("is_finished_item") or 0),
+            }
+        )
+        grouped[parent].append(base)
+
+    entries = []
+    for row in paged_entries:
+        entry_name = cstr(row.get("name"))
+        entries.append(
+            {
+                "stock_entry": entry_name,
+                "posting_date": cstr(row.get("posting_date") or ""),
+                "posting_time": cstr(row.get("posting_time") or ""),
+                "items": grouped.get(entry_name, []),
+            }
+        )
+
+    total_distinct_items_row = frappe.db.sql(
+        """
+        SELECT COUNT(DISTINCT sed.item_code) AS total_items
+        FROM `tabStock Entry` se
+        INNER JOIN `tabStock Entry Detail` target
+            ON target.parent = se.name
+        INNER JOIN `tabStock Entry Detail` sed
+            ON sed.parent = se.name
+        WHERE se.docstatus = 1
+          AND se.stock_entry_type = 'Manufacture'
+          AND target.item_code = %(item_code)s
+          AND sed.item_code != %(item_code)s
+        """,
+        {"item_code": current_code},
+        as_dict=True,
+    )
+
+    return {
+        "status": "success",
+        "item_code": current_code,
+        "pagination": {
+            "page": page,
+            "page_length": page_length,
+            "total_entries": total_entries,
+            "total_pages": total_pages,
+            "has_next": page < total_pages,
+            "has_prev": page > 1,
+        },
+        "entries": entries,
+        "summary": {
+            "total_distinct_items": cint(
+                (total_distinct_items_row[0] or {}).get("total_items")
+                if total_distinct_items_row
+                else 0
+            ),
+            "total_stock_entries": total_entries,
+        },
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

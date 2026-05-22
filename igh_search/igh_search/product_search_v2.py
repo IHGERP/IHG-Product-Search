@@ -55,6 +55,7 @@ FILTER_FIELDS = {
     "brand",
     "item_group",
     "category_list",
+    "series",
     "product_type",
     "power",
     "color_temp",
@@ -98,6 +99,7 @@ FACET_FIELDS = [
     "brand",
     "item_group",
     "category_list",
+    "series",
     "product_type",
     "power",
     "color_temp",
@@ -127,6 +129,7 @@ SEARCH_RESULT_FIELDS = (
     "item_name",
     "brand",
     "category_list",
+    "series",
     "item_group",
     "product_type",
     "image",
@@ -193,7 +196,7 @@ PRODUCT_V2_SCHEMA = {
         {"name": "category_list", "type": "string", "facet": True},
         {"name": "item_group", "type": "string", "facet": True},
         {"name": "stock_uom", "type": "string", "optional": True},
-        {"name": "series", "type": "string", "optional": True},
+        {"name": "series", "type": "string", "optional": True, "facet": True},
         {"name": "image", "type": "string", "optional": True},
         {"name": "is_stock_item", "type": "bool", "optional": True},
         {"name": "has_variants", "type": "bool", "optional": True},
@@ -663,8 +666,8 @@ def search_products_v2(
 
     search_parameters = {
         "q": query_text,
-        "query_by": "item_code_normalized,item_code,item_name_normalized,item_name,searchable_text,brand,category_list,parent_item_code,parent_item_name",
-        "query_by_weights": "12,10,8,6,4,2,2,2,2",
+        "query_by": "item_code_normalized,item_code,item_name_normalized,item_name,searchable_text,brand,category_list,series,parent_item_code,parent_item_name",
+        "query_by_weights": "12,10,8,6,4,2,2,2,2,2",
         "facet_by": ",".join(FACET_FIELDS),
         "filter_by": build_filter_by(filters=parsed_filters, include_inactive=include_inactive),
         "page": max(cint(page), 1),
@@ -673,8 +676,8 @@ def search_products_v2(
         "include_fields": ",".join(SEARCH_RESULT_FIELDS),
     }
     if sku_like:
-        search_parameters["prefix"] = "true,true,false,false,false,false,false,false,false"
-        search_parameters["num_typos"] = "0,0,1,1,1,1,1,1,1"
+        search_parameters["prefix"] = "true,true,false,false,false,false,false,false,false,false"
+        search_parameters["num_typos"] = "0,0,1,1,1,1,1,1,1,1"
 
     log_search_request(
         "request",
