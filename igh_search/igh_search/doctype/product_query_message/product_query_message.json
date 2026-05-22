@@ -1,0 +1,64 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "PQM-.#####",
+ "creation": "2026-05-22 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "details_section",
+  "query",
+  "sender_user",
+  "sender_name",
+  "sender_role",
+  "message_type",
+  "message",
+  "attachment"
+ ],
+ "fields": [
+  {"fieldname": "details_section", "fieldtype": "Section Break", "label": "Details"},
+  {"fieldname": "query", "fieldtype": "Link", "label": "Product Query", "options": "Product Query", "in_list_view": 1, "reqd": 1},
+  {"fieldname": "sender_user", "fieldtype": "Link", "label": "Sender User", "options": "User", "in_list_view": 1},
+  {"fieldname": "sender_name", "fieldtype": "Data", "label": "Sender Name"},
+  {"fieldname": "sender_role", "fieldtype": "Select", "label": "Sender Role", "options": "\nreporter\nadmin\nsystem", "default": "reporter", "in_list_view": 1},
+  {"fieldname": "message_type", "fieldtype": "Select", "label": "Message Type", "options": "\nmessage\nstatus_change\nsystem\nsolution", "default": "message", "in_list_view": 1},
+  {"fieldname": "message", "fieldtype": "Long Text", "label": "Message"},
+  {"fieldname": "attachment", "fieldtype": "Attach", "label": "Attachment"}
+ ],
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-05-22 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "IGH Search",
+ "name": "Product Query Message",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Item Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "ASC",
+ "states": [],
+ "track_changes": 0
+}
