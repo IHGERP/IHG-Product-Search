@@ -1243,6 +1243,18 @@ def get_all_masters(**kwargs):
         as_dict=True,
     )
 
+    category_lists = frappe.db.sql(
+        """
+        SELECT DISTINCT category_list AS name
+        FROM   `tabItem`
+        WHERE  IFNULL(TRIM(category_list), '') != ''
+          AND  disabled = 0
+        ORDER  BY category_list
+        LIMIT  1000
+        """,
+        as_dict=True,
+    )
+
     attr_rows = frappe.db.sql(
         """
         SELECT iav.parent AS attribute, iav.attribute_value AS value
@@ -1284,6 +1296,8 @@ def get_all_masters(**kwargs):
     return {
         "brands": [b.name for b in brands],
         "item_groups": [g.name for g in item_groups],
+        "category_list": [c.name for c in category_lists],
+        "categories": [c.name for c in category_lists],
         "attributes": attributes,
         "product_star_rating": star_rating_options,
         "customer_count": happy_customer_options,
