@@ -1759,53 +1759,8 @@ def get_product_manufacture_items(item_code=None, page=1, page_length=20, **kwar
 #  MASTERS  (for filter panel in search UI)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _facet_values_from_typesense_multi(field_names):
-    """Return {field_name: [values...]} using a SINGLE Typesense faceted search."""
-    out = {f: [] for f in (field_names or [])}
-    if not out:
-        return out
-    try:
-        from igh_search.igh_search.product_search_v2 import (
-            create_typesense_client,
-            get_default_collection,
-        )
-        client = create_typesense_client()
-        response = client.collections[get_default_collection()].documents.search(
-            {
-                "q": "*",
-                "query_by": "item_code,item_name,searchable_text",
-                "facet_by": ",".join(out.keys()),
-                "page": 1,
-                "per_page": 1,
-                "max_facet_values": 1000,
-            }
-        )
-        for facet in response.get("facet_counts", []):
-            fn = facet.get("field_name")
-            if fn in out:
-                out[fn] = [
-                    cstr(c.get("value")).strip()
-                    for c in facet.get("counts", [])
-                    if cstr(c.get("value")).strip()
-                ]
-    except Exception:
-        pass
-    return out
-
-
 @frappe.whitelist(allow_guest=True)
 def get_all_masters(**kwargs):
-    # Filter-panel metadata is global and changes rarely, but is expensive to
-    # build (two DISTINCT full scans over tabItem + Typesense facet calls).
-    # Cache the assembled payload in Redis (1h). Pass force_refresh=1 to rebuild.
-    force_refresh = cint(kwargs.get("force_refresh") or 0)
-    cache = frappe.cache()
-    cache_key = "igh_search:all_masters:v2"
-    if not force_refresh:
-        cached = cache.get_value(cache_key)
-        if cached:
-            return cached
-
     brands = frappe.db.sql(
         """
         SELECT DISTINCT brand AS name
@@ -1857,14 +1812,28 @@ def get_all_masters(**kwargs):
     happy_customer_options = ["50", "75", "100"]
     manufactured_item_options = ["1", "0"]
 
-    # Spec facet values from Typesense in ONE faceted request (was 4 sequential
-    # calls; "lumen_output" was dropped as it is not a facet field in the schema
-    # and always 404'd -> []).
-    spec_facets = _facet_values_from_typesense_multi(
-        ["input_voltage", "output_current", "output_voltage"]
-    )
+    def _facet_values_from_typesense(field_name):
+        try:
+            from igh_search.igh_search.product_search_v2 import create_typesense_client, get_default_collection
+            client = create_typesense_client()
+            response = client.collections[get_default_collection()].documents.search(
+                {
+                    "q": "*",
+                    "query_by": "item_code,item_name,searchable_text",
+                    "facet_by": field_name,
+                    "page": 1,
+                    "per_page": 1,
+                    "max_facet_values": 1000,
+                }
+            )
+            for facet in response.get("facet_counts", []):
+                if facet.get("field_name") == field_name:
+                    return [cstr(c.get("value")).strip() for c in facet.get("counts", []) if cstr(c.get("value")).strip()]
+        except Exception:
+            return []
+        return []
 
-    result = {
+    return {
         "brands": [b.name for b in brands],
         "item_groups": [g.name for g in item_groups],
         "category_list": [c.name for c in category_lists],
@@ -1873,13 +1842,11 @@ def get_all_masters(**kwargs):
         "product_star_rating": star_rating_options,
         "customer_count": happy_customer_options,
         "is_manufactured_item": manufactured_item_options,
-        "lumen_output": [],
-        "input_voltage": spec_facets.get("input_voltage", []),
-        "output_current": spec_facets.get("output_current", []),
-        "output_voltage": spec_facets.get("output_voltage", []),
+        "lumen_output": _facet_values_from_typesense("lumen_output"),
+        "input_voltage": _facet_values_from_typesense("input_voltage"),
+        "output_current": _facet_values_from_typesense("output_current"),
+        "output_voltage": _facet_values_from_typesense("output_voltage"),
     }
-    cache.set_value(cache_key, result, expires_in_sec=3600)
-    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
