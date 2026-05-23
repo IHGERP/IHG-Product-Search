@@ -173,35 +173,13 @@ doc_events.update(
     }
 )
 
-
-doc_events.update(
-    {
-        "Bin": {
-            "on_update": "igh_search.igh_search.product_stock_freshness.on_bin_change",
-            "after_insert": "igh_search.igh_search.product_stock_freshness.on_bin_change",
-        },
-        "Stock Ledger Entry": {
-            "on_update": "igh_search.igh_search.product_stock_freshness.on_stock_ledger_entry_change",
-            "after_insert": "igh_search.igh_search.product_stock_freshness.on_stock_ledger_entry_change",
-        },
-    }
-)
-
 # Scheduled Tasks
 # ---------------
 
 scheduler_events = {
     "daily": [
         "igh_search.igh_search.doctype.typesense_settings.typesense_settings.initialize_syncing_items"
-    ],
-    "cron": {
-        "*/1 * * * *": [
-            "igh_search.igh_search.product_stock_freshness.process_pending_stock_sync_batch"
-        ],
-        "*/30 * * * *": [
-            "igh_search.igh_search.product_stock_freshness.run_stock_drift_repair"
-        ],
-    },
+    ]
 }
 
 after_install = [

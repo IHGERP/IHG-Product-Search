@@ -2141,24 +2141,3 @@ def reopen_product_query(**kwargs):
 def get_product_query_rankings(**kwargs):
     from igh_search.igh_search.product_query import get_product_query_rankings as _f
     return _f(**_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def get_search_freshness_health(**kwargs):
-    from igh_search.igh_search.product_stock_freshness import get_search_freshness_health as _f
-
-    return _f(**_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def run_stock_drift_repair(**kwargs):
-    from igh_search.igh_search.product_stock_freshness import run_stock_drift_repair as _f
-
-    return _f(**_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def reindex_stock_for_items(**kwargs):
-    from igh_search.igh_search.product_stock_freshness import reindex_stock_for_items_api as _f
-
-    return _f(**_sanitize_framework_kwargs(kwargs))

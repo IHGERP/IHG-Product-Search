@@ -1,6 +1,5 @@
 import copy
 import json
-import time
 from datetime import datetime
 from json import JSONDecodeError
 
@@ -652,7 +651,6 @@ def search_products_v2(
 ):
     ensure_query_access(feature_flag_override=feature_flag_override)
 
-    started_at = time.perf_counter()
     client = create_typesense_client()
     parsed_filters = parse_search_filters(filters)
     query_resolution = resolve_effective_query(query=query, item_code_hint=item_code_hint)
@@ -701,45 +699,8 @@ def search_products_v2(
     response = client.collections[get_default_collection()].documents.search(
         search_parameters
     )
-
-    stock_reconcile = {
-        "freshness_source": "index",
-        "checked_count": 0,
-        "reconciled_count": 0,
-    }
-    try:
-        from igh_search.igh_search.product_stock_freshness import reconcile_search_hits_stock
-
-        # Reconcile the FULL returned page (single batched SQL via
-        # get_authoritative_stock_snapshot + Redis cache), not just the top 8.
-        # Lets us drop the redundant per-item stock fan-out in the Next.js
-        # proxy and frontend. A positive site_config value still caps it.
-        configured_top_n = cint((frappe.conf or {}).get("stock_runtime_reconcile_top_n", 0))
-        top_n = configured_top_n if configured_top_n > 0 else len(response.get("hits", []))
-        stock_reconcile = reconcile_search_hits_stock(
-            response.get("hits", []),
-            query=query,
-            item_code_hint=item_code_hint,
-            top_n=top_n,
-        )
-        response["hits"] = stock_reconcile.get("hits", response.get("hits", []))
-    except Exception:
-        frappe.log_error(
-            frappe.get_traceback(),
-            "IGH Search V2: stock runtime reconcile failed",
-        )
-
     if sort_resolution["should_rerank"]:
         response["hits"] = rank_search_hits(response.get("hits", []), query_text)
-
-    latency_ms = int((time.perf_counter() - started_at) * 1000)
-    try:
-        from igh_search.igh_search.product_stock_freshness import record_search_latency
-
-        record_search_latency(latency_ms)
-    except Exception:
-        pass
-
     response["applied_filters"] = parsed_filters
     response["query_debug"] = {
         "normalized_query": query_resolution["normalized_query"],
@@ -750,14 +711,10 @@ def search_products_v2(
         "applied_sort": sort_resolution["final_sort"],
         "fallback_reasons": sort_resolution["fallback_reasons"],
         "search_parameters": search_parameters,
-        "latency_ms": latency_ms,
-        "stock_reconcile": {
-            "freshness_source": stock_reconcile.get("freshness_source", "index"),
-            "checked_count": cint(stock_reconcile.get("checked_count") or 0),
-            "reconciled_count": cint(stock_reconcile.get("reconciled_count") or 0),
-        },
     }
     return response
+
+
 def suggest_products_v2(query=None, limit=10, feature_flag_override=0):
     response = search_products_v2(
         query=query,

@@ -710,12 +710,7 @@ def search_products_v2(
     try:
         from igh_search.igh_search.product_stock_freshness import reconcile_search_hits_stock
 
-        # Reconcile the FULL returned page (single batched SQL via
-        # get_authoritative_stock_snapshot + Redis cache), not just the top 8.
-        # Lets us drop the redundant per-item stock fan-out in the Next.js
-        # proxy and frontend. A positive site_config value still caps it.
-        configured_top_n = cint((frappe.conf or {}).get("stock_runtime_reconcile_top_n", 0))
-        top_n = configured_top_n if configured_top_n > 0 else len(response.get("hits", []))
+        top_n = cint((frappe.conf or {}).get("stock_runtime_reconcile_top_n", 8))
         stock_reconcile = reconcile_search_hits_stock(
             response.get("hits", []),
             query=query,

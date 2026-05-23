@@ -141,18 +141,3 @@ def create_product_data_issue(*args, **kwargs):
 @frappe.whitelist(allow_guest=True)
 def update_product_data_issue(*args, **kwargs):
     return _impl().update_product_data_issue(*args, **_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def get_search_freshness_health(*args, **kwargs):
-    return _impl().get_search_freshness_health(*args, **_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def run_stock_drift_repair(*args, **kwargs):
-    return _impl().run_stock_drift_repair(*args, **_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def reindex_stock_for_items(*args, **kwargs):
-    return _impl().reindex_stock_for_items(*args, **_sanitize_framework_kwargs(kwargs))
