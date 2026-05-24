@@ -1,5 +1,4 @@
 import copy
-import hashlib
 import json
 import os
 import re
@@ -285,7 +284,6 @@ def get_ai_search_quality_report():
     for metric_name in (
         "requests",
         "deterministic_only",
-        "intent_cache_hit",
         "provider_openai",
         "provider_groq",
         "provider_fallback",
@@ -334,99 +332,54 @@ def _serialize_roles():
         return []
 
 
-def _async_event_logging_enabled():
-    # Defaults to ON. Set `ai_product_search_async_logging: 0` in site_config to
-    # force synchronous inserts (e.g. if background workers are unavailable).
-    val = _get_conf().get("ai_product_search_async_logging")
-    return True if val is None else bool(cint(val))
-
-
-def _build_ai_search_event_dict(name, event_type, payload):
-    # Build the full doc dict in the REQUEST context so session/user/roles are
-    # captured correctly even when the actual insert is deferred to a worker.
-    payload = payload or {}
-    page_context = payload.get("page_context") or {}
-    resolved_intent = payload.get("resolved_intent") or {}
-    top_item_codes = payload.get("top_item_codes") or []
-    deterministic_signals = payload.get("deterministic_signals") or resolved_intent.get("signals") or []
-    return {
-        "doctype": "AI Product Search Event",
-        "name": name,
-        "event_type": event_type,
-        "search_event_reference": cstr(payload.get("search_event_reference") or ""),
-        "raw_message": cstr(payload.get("raw_message") or ""),
-        "normalized_query": cstr(payload.get("normalized_query") or ""),
-        "selected_item_code": cstr(payload.get("selected_item_code") or ""),
-        "related_item_code": cstr(payload.get("related_item_code") or ""),
-        "provider": cstr(payload.get("provider") or ""),
-        "llm_used": cint(payload.get("llm_used") or 0),
-        "applied_sort": cstr(payload.get("applied_sort") or ""),
-        "result_count": cint(payload.get("result_count") or 0),
-        "latency_ms": flt(payload.get("latency_ms") or 0),
-        "route": cstr(page_context.get("route") or payload.get("route") or ""),
-        "session_id": cstr(getattr(frappe.session, "sid", "") or ""),
-        "user_id": cstr(getattr(frappe.session, "user", "") or ""),
-        "user_roles": _json_dumps(_serialize_roles()),
-        "resolved_intent_json": _json_dumps(resolved_intent),
-        "deterministic_signals_json": _json_dumps(deterministic_signals),
-        "applied_filters_json": _json_dumps(payload.get("applied_filters") or {}),
-        "applied_relaxations_json": _json_dumps(payload.get("applied_relaxations") or []),
-        "quality_signals_json": _json_dumps(payload.get("quality_signals") or {}),
-        "top_item_codes_json": _json_dumps(top_item_codes),
-        "page_context_json": _json_dumps(page_context),
-        "benchmark_case_name": cstr(payload.get("benchmark_case_name") or ""),
-        "outcome_status": cstr(payload.get("outcome_status") or ""),
-        "reformulated_from": cstr(payload.get("reformulated_from") or ""),
-    }
-
-
-def _insert_ai_search_event(doc_dict=None):
-    # Performs the actual insert. Runs either inline (sync fallback) or inside a
-    # background worker. `in_import` is toggled so our pre-generated `name`
-    # survives the doctype's naming series (AIQEV-.#####) on Frappe v14.
-    if not doc_dict or not _doctype_exists("AI Product Search Event"):
-        return
-    prev_in_import = frappe.flags.in_import
-    try:
-        frappe.flags.in_import = True
-        frappe.get_doc(doc_dict).insert(ignore_permissions=True)
-    except Exception:
-        log_ai_product_search(
-            "event_log_failure",
-            {"event_type": doc_dict.get("event_type"), "error": frappe.get_traceback()},
-        )
-    finally:
-        frappe.flags.in_import = prev_in_import
-
-
 def log_ai_search_event(event_type, payload=None):
+    payload = payload or {}
     if not _doctype_exists("AI Product Search Event"):
         return None
 
-    # Pre-generate the id so we can return it immediately and hand the insert to
-    # a background worker, keeping the search hot path off the DB write + the
-    # naming-series row lock.
-    name = frappe.generate_hash(length=14)
-    doc_dict = _build_ai_search_event_dict(name, event_type, payload)
-
-    if _async_event_logging_enabled():
-        try:
-            frappe.enqueue(
-                "igh_search.igh_search.ai_product_search._insert_ai_search_event",
-                queue="short",
-                enqueue_after_commit=True,
-                doc_dict=doc_dict,
-            )
-            return name
-        except Exception:
-            # Redis/worker unavailable — fall back to a synchronous insert.
-            log_ai_product_search(
-                "event_enqueue_failure",
-                {"event_type": event_type, "error": frappe.get_traceback()},
-            )
-
-    _insert_ai_search_event(doc_dict)
-    return name
+    try:
+        page_context = payload.get("page_context") or {}
+        resolved_intent = payload.get("resolved_intent") or {}
+        top_item_codes = payload.get("top_item_codes") or []
+        deterministic_signals = payload.get("deterministic_signals") or resolved_intent.get("signals") or []
+        event = frappe.get_doc(
+            {
+                "doctype": "AI Product Search Event",
+                "event_type": event_type,
+                "search_event_reference": cstr(payload.get("search_event_reference") or ""),
+                "raw_message": cstr(payload.get("raw_message") or ""),
+                "normalized_query": cstr(payload.get("normalized_query") or ""),
+                "selected_item_code": cstr(payload.get("selected_item_code") or ""),
+                "related_item_code": cstr(payload.get("related_item_code") or ""),
+                "provider": cstr(payload.get("provider") or ""),
+                "llm_used": cint(payload.get("llm_used") or 0),
+                "applied_sort": cstr(payload.get("applied_sort") or ""),
+                "result_count": cint(payload.get("result_count") or 0),
+                "latency_ms": flt(payload.get("latency_ms") or 0),
+                "route": cstr(page_context.get("route") or payload.get("route") or ""),
+                "session_id": cstr(getattr(frappe.session, "sid", "") or ""),
+                "user_id": cstr(getattr(frappe.session, "user", "") or ""),
+                "user_roles": _json_dumps(_serialize_roles()),
+                "resolved_intent_json": _json_dumps(resolved_intent),
+                "deterministic_signals_json": _json_dumps(deterministic_signals),
+                "applied_filters_json": _json_dumps(payload.get("applied_filters") or {}),
+                "applied_relaxations_json": _json_dumps(payload.get("applied_relaxations") or []),
+                "quality_signals_json": _json_dumps(payload.get("quality_signals") or {}),
+                "top_item_codes_json": _json_dumps(top_item_codes),
+                "page_context_json": _json_dumps(page_context),
+                "benchmark_case_name": cstr(payload.get("benchmark_case_name") or ""),
+                "outcome_status": cstr(payload.get("outcome_status") or ""),
+                "reformulated_from": cstr(payload.get("reformulated_from") or ""),
+            }
+        )
+        event.insert(ignore_permissions=True)
+        return event.name
+    except Exception:
+        log_ai_product_search(
+            "event_log_failure",
+            {"event_type": event_type, "error": frappe.get_traceback()},
+        )
+        return None
 
 
 def _fetch_event_doc(event_name):
@@ -1965,36 +1918,6 @@ def _finalize_intent(intent):
     return resolved
 
 
-INTENT_CACHE_DEFAULT_TTL = 60 * 60
-
-
-def _intent_cache_ttl():
-    # Seconds to cache a resolved intent. 0 disables the cache. Override with
-    # `ai_product_search_intent_cache_ttl` in site_config.
-    val = _get_conf().get("ai_product_search_intent_cache_ttl")
-    if val is None:
-        return INTENT_CACHE_DEFAULT_TTL
-    return max(cint(val), 0)
-
-
-def _vocabulary_version(vocabulary):
-    # Short fingerprint of the live vocabulary so that adding/removing catalog
-    # values (brands, categories, …) invalidates any stale cached intents.
-    try:
-        blob = json.dumps(vocabulary, sort_keys=True, default=str)
-    except Exception:
-        blob = str(vocabulary)
-    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:10]
-
-
-def _intent_cache_key(message, page_context, vocab_version):
-    route = ""
-    if isinstance(page_context, dict):
-        route = cstr(page_context.get("route") or "")
-    raw = f"{normalize_text(message)}|{route}|{vocab_version}"
-    return "ai_product_search|intent|" + hashlib.sha1(raw.encode("utf-8")).hexdigest()
-
-
 def resolve_ai_search_intent(message, page_context=None, mode="fast"):
     message = cstr(message).strip()
     if not message:
@@ -2016,38 +1939,6 @@ def resolve_ai_search_intent(message, page_context=None, mode="fast"):
     start_ts = time.time()
     record_ai_metric("requests")
     vocabulary = get_ai_search_vocabulary()
-
-    # ── Resolved-intent cache ──────────────────────────────────────────────
-    # The intent (filters/query/sort) is deterministic for a given message +
-    # vocabulary, so cache it to skip the deterministic parse and (more
-    # importantly) the LLM call on repeated/identical prompts. Search RESULTS
-    # are never cached — execute_intent_search always runs live downstream.
-    intent_ttl = _intent_cache_ttl()
-    intent_cache_key = None
-    if intent_ttl > 0:
-        intent_cache_key = _intent_cache_key(
-            message, page_context, _vocabulary_version(vocabulary)
-        )
-        cached_intent = frappe.cache().get_value(intent_cache_key)
-        if cached_intent:
-            try:
-                finalized = (
-                    json.loads(cached_intent)
-                    if isinstance(cached_intent, str)
-                    else copy.deepcopy(cached_intent)
-                )
-                record_ai_metric("intent_cache_hit")
-                finalized["query_debug"] = {
-                    "latency_ms": round((time.time() - start_ts) * 1000, 2),
-                    "llm_used": finalized.get("llm_used", False),
-                    "provider": finalized.get("provider", "deterministic"),
-                    "signals": finalized.get("signals", []),
-                    "cached": True,
-                }
-                return finalized
-            except Exception:
-                pass
-
     preprocessed = preprocess_user_message(message, page_context=page_context)
     deterministic_intent = extract_deterministic_intent(preprocessed, vocabulary)
     deterministic_intent["explanation_parts"].append(
@@ -2108,15 +1999,6 @@ def resolve_ai_search_intent(message, page_context=None, mode="fast"):
     }
     if not llm_used:
         record_ai_metric("deterministic_only")
-    if intent_cache_key and intent_ttl > 0:
-        try:
-            # Store as JSON (finalized is already JSON-serializable since it is
-            # returned to the client) to avoid pickling non-portable objects.
-            frappe.cache().set_value(
-                intent_cache_key, json.dumps(finalized), expires_in_sec=intent_ttl
-            )
-        except Exception:
-            pass
     return finalized
 
 
