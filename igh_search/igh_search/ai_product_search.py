@@ -20,6 +20,13 @@ from igh_search.igh_search.search_normalization import (
     normalize_text,
 )
 
+try:
+    from rapidfuzz import fuzz as _rf_fuzz, process as _rf_process
+
+    _HAS_RAPIDFUZZ = True
+except Exception:  # pragma: no cover - fuzzy matching degrades gracefully
+    _HAS_RAPIDFUZZ = False
+
 OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
@@ -586,6 +593,39 @@ def track_ai_search_outcome(
     return {"search_event_id": search_event_id, "outcome_event_id": outcome_event_id}
 
 
+def _benchmark_filters_match(expected, applied):
+    # Returns True/False if the case asserts filters, else None (no assertion).
+    # Lists = subset (normalized); bools = equality; dict = active range with
+    # each given bound within 20% tolerance (covers the ±10% / ±500 widening the
+    # resolver applies to single values like "10w").
+    if not expected:
+        return None
+    applied = applied or {}
+    for key, exp_val in expected.items():
+        act_val = applied.get(key)
+        if isinstance(exp_val, dict):
+            act = act_val if isinstance(act_val, dict) else {}
+            amin, amax = flt(act.get("min")), flt(act.get("max"))
+            if amin == 0 and amax in (0, DEFAULT_RANGE_MAX):
+                return False  # range is default/unset
+            for bound in ("min", "max"):
+                if bound in exp_val:
+                    tol = max(1.0, abs(flt(exp_val[bound])) * 0.2)
+                    if abs(flt(act.get(bound)) - flt(exp_val[bound])) > tol:
+                        return False
+        elif isinstance(exp_val, bool):
+            if bool(act_val) != exp_val:
+                return False
+        elif isinstance(exp_val, list):
+            act_norm = {normalize_text(v) for v in (act_val or [])}
+            if any(normalize_text(v) not in act_norm for v in exp_val):
+                return False
+        else:
+            if normalize_text(exp_val) != normalize_text(act_val):
+                return False
+    return True
+
+
 def load_ai_search_benchmark_cases():
     benchmark_path = frappe.get_app_path(
         "igh_search", "igh_search", "data", "ai_product_search_benchmark.json"
@@ -604,6 +644,8 @@ def evaluate_ai_search_benchmark(feature_flag_override=0):
         "total_cases": 0,
         "intent_matches": 0,
         "sort_matches": 0,
+        "filter_matches": 0,
+        "filter_cases": 0,
         "non_zero_results": 0,
         "details": [],
     }
@@ -625,10 +667,16 @@ def evaluate_ai_search_benchmark(feature_flag_override=0):
             cstr(case.get("expected_sort_by") or "")
             == cstr(result.get("applied_sort") or "")
         )
+        expected_filters = case.get("expected_filters")
+        filter_match = _benchmark_filters_match(expected_filters, result.get("applied_filters"))
         if intent_match:
             summary["intent_matches"] += 1
         if sort_match:
             summary["sort_matches"] += 1
+        if expected_filters:
+            summary["filter_cases"] += 1
+            if filter_match:
+                summary["filter_matches"] += 1
         if cint(result.get("found")) > 0:
             summary["non_zero_results"] += 1
 
@@ -639,6 +687,9 @@ def evaluate_ai_search_benchmark(feature_flag_override=0):
             "actual_intent_class": result.get("resolved_intent", {}).get("intent_class"),
             "expected_sort_by": case.get("expected_sort_by") or "",
             "actual_sort_by": result.get("applied_sort") or "",
+            "expected_filters": expected_filters or {},
+            "actual_filters": result.get("applied_filters") or {},
+            "filter_match": filter_match,
             "found": result.get("found"),
             "intent_match": intent_match,
             "sort_match": sort_match,
@@ -676,6 +727,12 @@ def evaluate_ai_search_benchmark(feature_flag_override=0):
         summary["intent_match_rate"] = 0
         summary["sort_match_rate"] = 0
         summary["non_zero_result_rate"] = 0
+
+    summary["filter_match_rate"] = (
+        round((summary["filter_matches"] / summary["filter_cases"]) * 100, 2)
+        if summary["filter_cases"]
+        else 0
+    )
 
     return summary
 
@@ -1033,6 +1090,33 @@ def _build_family_lookup(known_lookup):
     return category_map, item_group_map
 
 
+def _fuzzy_family_candidate(phrases, category_map, item_group_map, score_cutoff=88):
+    # Typo/spacing tolerance: when exact token matching fails, fuzzy-match the
+    # message's family tokens against known category/item-group tokens. Only for
+    # reasonably long tokens, with a high cutoff, taking the single best hit —
+    # so "donwlight"/"spot lite"/"pannel light" still resolve to the facet.
+    if not _HAS_RAPIDFUZZ:
+        return None
+    cat_tokens = list(category_map.keys())
+    ig_tokens = list(item_group_map.keys())
+    best = None  # (score, kind, matched_token, phrase)
+    for phrase in phrases:
+        token = _normalize_family_token(phrase)
+        if not token or len(token) < 6:
+            continue
+        for kind, choices in (("category", cat_tokens), ("item_group", ig_tokens)):
+            if not choices:
+                continue
+            match = _rf_process.extractOne(
+                token, choices, scorer=_rf_fuzz.ratio, score_cutoff=score_cutoff
+            )
+            if match and (best is None or match[1] > best[0]):
+                best = (match[1], kind, match[0], phrase)
+    if best:
+        return {"kind": best[1], "token": best[2], "phrase": best[3]}
+    return None
+
+
 def _resolve_family_match(normalized_message, known_lookup):
     phrases = _extract_family_phrase_candidates(normalized_message)
     category_map, item_group_map = _build_family_lookup(known_lookup)
@@ -1043,6 +1127,7 @@ def _resolve_family_match(normalized_message, known_lookup):
     # mean different families — keep only the most specific one (longest matched
     # phrase) instead of broadening the facet across unrelated families.
     token_hits = {}
+    fuzzy_used = False
     for phrase in phrases:
         token = _normalize_family_token(phrase)
         if not token:
@@ -1059,6 +1144,19 @@ def _resolve_family_match(normalized_message, known_lookup):
         entry["categories"].update(categories)
         entry["item_groups"].update(item_groups)
 
+    # Fuzzy fallback only when exact matching found nothing (typos/spacing).
+    fuzzy_used = False
+    if not token_hits:
+        fuzzy = _fuzzy_family_candidate(phrases, category_map, item_group_map)
+        if fuzzy:
+            fuzzy_used = True
+            entry = {"phrase": fuzzy["phrase"], "categories": set(), "item_groups": set()}
+            if fuzzy["kind"] == "category":
+                entry["categories"] = set(category_map.get(fuzzy["token"], set()))
+            else:
+                entry["item_groups"] = set(item_group_map.get(fuzzy["token"], set()))
+            token_hits[fuzzy["token"]] = entry
+
     if not token_hits:
         return {"filter_key": "", "values": [], "matched_phrases": [], "signal": "family_match:none"}
 
@@ -1069,12 +1167,14 @@ def _resolve_family_match(normalized_message, known_lookup):
     # back to keyword search rather than over-broadening the facet filter.
     MAX_FAMILY_VALUES = 8
 
+    suffix = ":fuzzy" if fuzzy_used else ""
+
     if best["categories"] and len(best["categories"]) <= MAX_FAMILY_VALUES:
         return {
             "filter_key": "category_list",
             "values": sorted(best["categories"]),
             "matched_phrases": [best["phrase"]],
-            "signal": "family_match:category_list",
+            "signal": f"family_match:category_list{suffix}",
         }
 
     if best["item_groups"] and len(best["item_groups"]) <= MAX_FAMILY_VALUES:
@@ -1082,7 +1182,7 @@ def _resolve_family_match(normalized_message, known_lookup):
             "filter_key": "item_group",
             "values": sorted(best["item_groups"]),
             "matched_phrases": [best["phrase"]],
-            "signal": "family_match:item_group_fallback",
+            "signal": f"family_match:item_group_fallback{suffix}",
         }
 
     return {"filter_key": "", "values": [], "matched_phrases": [], "signal": "family_match:none"}
@@ -1874,7 +1974,12 @@ def _replace_display_query_phrase(text, phrase):
 
 
 def build_ai_display_query(message, intent, applied_filters, applied_sort=""):
-    candidate = normalize_text(intent.get("query") or intent.get("item_code_hint") or message)
+    # Mirror the actual search query (intent.query). When the resolver emptied
+    # it on purpose — e.g. a family noun was mapped to the category facet —
+    # the displayed keyword must be empty too. Falling back to the raw message
+    # here would resurrect words like "spotlights" as a phantom keyword chip
+    # even though the search is filter-only.
+    candidate = normalize_text(intent.get("query") or intent.get("item_code_hint") or "")
     if not candidate:
         return ""
 
