@@ -28,6 +28,28 @@ DEFAULT_RANGE_MAX = 1000000000
 KNOWN_VALUES_CACHE_TTL = 60 * 60
 VOCABULARY_CACHE_TTL = 15 * 60
 METRICS_CACHE_TTL = 24 * 60 * 60
+# Spec/environment words captured by structured filters — stripped from the
+# free-text query so they don't over-constrain the Typesense text match.
+SPEC_SYNONYM_QUERY_TERMS = (
+    "warm white",
+    "cool white",
+    "cold white",
+    "neutral white",
+    "natural white",
+    "daylight",
+    "day light",
+    "waterproof",
+    "water proof",
+    "weatherproof",
+    "weather proof",
+    "ip rated",
+    "ip-rated",
+    "ingress protection",
+    "outdoor",
+    "exterior",
+    "indoor",
+    "interior",
+)
 FEEDBACK_WEIGHTS = {
     "search_click": 1,
     "shortlist": 3,
@@ -1015,43 +1037,55 @@ def _resolve_family_match(normalized_message, known_lookup):
     phrases = _extract_family_phrase_candidates(normalized_message)
     category_map, item_group_map = _build_family_lookup(known_lookup)
 
-    category_hits = set()
-    item_group_hits = set()
-    matched_phrases = []
-
+    # Group hits by the normalized token that produced them. Values sharing a
+    # token are naming variants of the SAME family (e.g. "SPOT LIGHT",
+    # "SPOTLIGHT", "SPOT LIGHTS") and are safe to OR together. Different tokens
+    # mean different families — keep only the most specific one (longest matched
+    # phrase) instead of broadening the facet across unrelated families.
+    token_hits = {}
     for phrase in phrases:
         token = _normalize_family_token(phrase)
         if not token:
             continue
-        category_candidates = category_map.get(token, set())
-        item_group_candidates = item_group_map.get(token, set())
-        if category_candidates or item_group_candidates:
-            matched_phrases.append(phrase)
-        category_hits.update(category_candidates)
-        item_group_hits.update(item_group_candidates)
+        categories = category_map.get(token, set())
+        item_groups = item_group_map.get(token, set())
+        if not categories and not item_groups:
+            continue
+        entry = token_hits.setdefault(
+            token, {"phrase": phrase, "categories": set(), "item_groups": set()}
+        )
+        if len(phrase) > len(entry["phrase"]):
+            entry["phrase"] = phrase
+        entry["categories"].update(categories)
+        entry["item_groups"].update(item_groups)
 
-    if len(category_hits) == 1:
+    if not token_hits:
+        return {"filter_key": "", "values": [], "matched_phrases": [], "signal": "family_match:none"}
+
+    best_token = max(token_hits, key=lambda t: (len(token_hits[t]["phrase"]), len(t)))
+    best = token_hits[best_token]
+
+    # Defensive cap: a single token resolving to a huge set is suspicious — fall
+    # back to keyword search rather than over-broadening the facet filter.
+    MAX_FAMILY_VALUES = 8
+
+    if best["categories"] and len(best["categories"]) <= MAX_FAMILY_VALUES:
         return {
             "filter_key": "category_list",
-            "value": sorted(category_hits)[0],
-            "matched_phrases": matched_phrases,
+            "values": sorted(best["categories"]),
+            "matched_phrases": [best["phrase"]],
             "signal": "family_match:category_list",
         }
 
-    if not category_hits and len(item_group_hits) == 1:
+    if best["item_groups"] and len(best["item_groups"]) <= MAX_FAMILY_VALUES:
         return {
             "filter_key": "item_group",
-            "value": sorted(item_group_hits)[0],
-            "matched_phrases": matched_phrases,
+            "values": sorted(best["item_groups"]),
+            "matched_phrases": [best["phrase"]],
             "signal": "family_match:item_group_fallback",
         }
 
-    return {
-        "filter_key": "",
-        "value": "",
-        "matched_phrases": matched_phrases,
-        "signal": "family_match:none",
-    }
+    return {"filter_key": "", "values": [], "matched_phrases": [], "signal": "family_match:none"}
 
 
 def _remove_matched_family_phrases(query_text, matched_phrases):
@@ -1176,8 +1210,36 @@ def _extract_additional_specs(intent, preprocessed_message):
     environment = _infer_environment(normalized_message)
     if environment:
         derived_specs["environment"] = environment
-        if environment == "outdoor" and not intent["filters"]["ip_rate"]:
-            _append_derived_query_token(intent, "outdoor", "environment")
+
+    # Weatherproofing words imply a minimum ingress-protection rating. Applied
+    # only when the user did not already give an explicit IP value.
+    wants_weatherproof = environment == "outdoor" or any(
+        term in normalized_message
+        for term in (
+            "waterproof",
+            "water proof",
+            "weatherproof",
+            "weather proof",
+            "ip rated",
+            "ip-rated",
+            "ingress protection",
+        )
+    )
+    if (
+        wants_weatherproof
+        and not intent["filters"].get("ip_rate")
+        and _is_default_range_value(
+            "ip_rating_numeric_range", intent["filters"].get("ip_rating_numeric_range")
+        )
+    ):
+        _set_range(
+            intent,
+            "ip_rating_numeric_range",
+            min_value=65,
+            source="weatherproof_synonym",
+            confidence=0.75,
+        )
+        derived_specs["weatherproof"] = "IP65+"
 
     if derived_specs:
         intent["derived_specs"].update(derived_specs)
@@ -1357,7 +1419,23 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
 
     _extract_additional_specs(intent, preprocessed_message)
 
-    matched_values = _match_known_values(expanded_message, known_lookup)
+    # Strip colour-temperature phrases before vocabulary matching so the
+    # standalone "white" in "warm white"/"cool white" doesn't leak into the
+    # body_finish facet (it's a CCT signal, not a finish).
+    vocab_message = expanded_message
+    for term in (
+        "warm white",
+        "cool white",
+        "cold white",
+        "neutral white",
+        "natural white",
+        "daylight",
+        "day light",
+    ):
+        vocab_message = re.sub(
+            rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", " ", vocab_message
+        )
+    matched_values = _match_known_values(vocab_message, known_lookup)
     for filter_key, values in matched_values.items():
         if filter_key in ("ip_rate", "color_temp", "power"):
             continue
@@ -1370,15 +1448,17 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
     )
     if family_resolution.get("signal"):
         _add_signal(intent, family_resolution["signal"])
-    if family_resolution.get("filter_key") and family_resolution.get("value"):
-        _add_filter_value(
-            intent,
-            family_resolution["filter_key"],
-            family_resolution["value"],
-            "family_match",
-            confidence=0.95,
-            hard=True,
-        )
+    family_values = family_resolution.get("values") or []
+    if family_resolution.get("filter_key") and family_values:
+        for family_value in family_values:
+            _add_filter_value(
+                intent,
+                family_resolution["filter_key"],
+                family_value,
+                "family_match",
+                confidence=0.95,
+                hard=True,
+            )
 
     if page_context.get("brand"):
         _add_filter_value(intent, "brand", page_context["brand"], "page_context", confidence=0.6, hard=False)
@@ -1399,6 +1479,14 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
         query_candidate,
         (family_resolution.get("matched_phrases") or []) if family_resolution.get("filter_key") else [],
     )
+    # Spec/environment words that are now represented as structured filters are
+    # noise in the free-text query — leaving them in would over-constrain the
+    # Typesense text match (e.g. excluding IP65 items that don't literally say
+    # "waterproof"). Strip them so the filters do the narrowing.
+    for term in SPEC_SYNONYM_QUERY_TERMS:
+        query_candidate = re.sub(
+            rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", " ", query_candidate
+        )
     query_candidate = re.sub(r"\s+", " ", query_candidate).strip()
     if intent["intent_class"] != "sku_lookup" and query_candidate:
         _set_query(intent, query_candidate, "message")
@@ -1478,6 +1566,19 @@ def _build_model_messages(message, page_context, vocabulary, deterministic_inten
                 "filters": {"rate_range": {"min": 0, "max": 500}, "in_stock": True},
             },
         },
+        {
+            "message": "3000k spotlights below 10w",
+            "note": "spotlight matches a known category value, so it goes to category_list (exact known value), not query",
+            "response": {
+                "query": "",
+                "sort_by": "",
+                "filters": {
+                    "category_list": ["SPOT LIGHT"],
+                    "color_temp": ["3000K"],
+                    "power_value_range": {"min": 0, "max": 10},
+                },
+            },
+        },
     ]
 
     system_prompt = f"""
@@ -1494,6 +1595,8 @@ Domain rules:
 - Treat electrical specification language as high-signal: wattage, color temperature/CCT, IP rating, beam angle, input voltage, output current, output voltage, dimming protocol, mounting type, lumen output.
 - If the user mentions a use case like outdoor, facade, corridor, hotel, office, retail, or display, prefer lighting interpretations that support that use case.
 - For terms like driver, strip, profile, track, panel, batten, flood, spot, and emergency, keep the query aligned to the lighting product family rather than generic meanings.
+- If a product-family noun (spotlight, downlight, panel light, track light, flood light, high bay, batten, wall washer, etc.) matches a value in known_filter_values.category_list, put that EXACT known category value into filters.category_list and leave it OUT of query. Use query only for free-text not already captured by a structured filter.
+- Map spec wording to filters: "warm white"≈3000K, "cool white"≈4000K, "daylight"≈6000K; "waterproof"/"weatherproof"/"outdoor"≈IP65 or higher. Prefer the matching range field when the user implies a bound (e.g. "below 10w", "under 500 aed").
 
 General rules:
 - Use ONLY the current V2 contract field names.
