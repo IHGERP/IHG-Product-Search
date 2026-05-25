@@ -9,6 +9,7 @@ from igh_search.igh_search.ai_product_search import (
     ARRAY_FILTER_KEYS,
     BOOLEAN_FILTER_KEYS,
     RANGE_FILTER_DEFAULTS,
+    _normalize_family_token,
     build_ai_display_filters,
     build_ai_display_query,
     execute_intent_search,
@@ -278,6 +279,17 @@ def _strip_consumed_query_terms(query, intent_filters):
     consumed = False
     covered_tokens = set()
 
+    # Compact family tokens for the applied category / item-group values. A typed
+    # family noun ("spotlights" → "spotlight") must be recognised as consumed
+    # even though the category value ("SPOT LIGHT") tokenises to separate words —
+    # otherwise it survives into applied_query and becomes a phantom keyword.
+    family_tokens = set()
+    for question_key in ("category_list", "item_group"):
+        for value in intent_filters.get(question_key) or []:
+            family_token = _normalize_family_token(value)
+            if family_token:
+                family_tokens.add(family_token)
+
     for question_key in ARRAY_FILTER_KEYS:
         for value in intent_filters.get(question_key) or []:
             for phrase in _filter_value_phrase_candidates(question_key, value):
@@ -303,11 +315,14 @@ def _strip_consumed_query_terms(query, intent_filters):
                     break
                 consumed = True
 
-    if query_tokens and covered_tokens:
+    if query_tokens and (covered_tokens or family_tokens):
         filtered_tokens = []
         for token in query_tokens:
             singular = _singularize_token(token)
             if token in covered_tokens or singular in covered_tokens:
+                consumed = True
+                continue
+            if family_tokens and _normalize_family_token(token) in family_tokens:
                 consumed = True
                 continue
             filtered_tokens.append(token)
