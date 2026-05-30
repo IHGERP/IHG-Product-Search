@@ -1230,9 +1230,7 @@ def _extract_current_values(normalized_message):
 
 
 def _extract_beam_values(normalized_message):
-    # Capture just the numeric degree value; the unit word (d/deg/degree/°) is
-    # matched but discarded so normalization can't mangle "degree" -> "DREE".
-    return re.findall(r"\b(\d{1,3})\s*(?:d|deg|degree|°)\b", normalized_message)
+    return re.findall(r"\b\d{1,3}\s*(?:d|deg|degree)\b", normalized_message)
 
 
 def _extract_numeric_first(text):
@@ -1351,34 +1349,14 @@ def _extract_additional_specs(intent, preprocessed_message):
         _add_signal(intent, "derived_specs")
 
 
-# Spec fields whose legitimate values are numeric (carry a digit). Catalog data
-# pollution leaks junk like beam_angle "Wall Washer" / "DIFFUSED" / "NA" into these
-# facets; a vocabulary match into them must contain a digit to be trusted.
-_NUMERIC_SPEC_FILTER_KEYS = {
-    "power", "color_temp", "ip_rate", "beam_angle",
-    "input_voltage", "output_voltage", "output_current", "lumen_output",
-}
-
-
 def _match_known_values(normalized_message, known_values):
-    # Phrases that are real category names must never be matched INTO a spec facet
-    # (bad index data lists e.g. "Wall Washer" as a beam_angle value). Category
-    # wins; the family-matcher handles category_list separately.
-    category_phrases = {
-        nv for nv in (known_values.get("category_list") or {}) if nv
-    }
     matches = {}
     for filter_key, values in (known_values or {}).items():
         if filter_key in {"category_list", "item_group"}:
             continue
-        numeric_field = filter_key in _NUMERIC_SPEC_FILTER_KEYS
         for normalized_value, canonical_value in values.items():
             if not normalized_value:
                 continue
-            if normalized_value in category_phrases:
-                continue  # it's a category name, not a spec value
-            if numeric_field and not re.search(r"\d", normalized_value):
-                continue  # junk non-numeric value polluting a numeric spec facet
 
             compact_value = cstr(normalized_value).replace(" ", "")
             if filter_key in {"input_voltage", "output_voltage"} and compact_value.endswith("ma"):
@@ -1518,8 +1496,7 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
         break
 
     for beam in _extract_beam_values(normalized_message):
-        # beam is the bare number (e.g. "36"); render as the catalog form "36°".
-        beam_value = f"{beam}°"
+        beam_value = beam.upper().replace("DEG", "D").replace("DEGREE", "D").replace(" ", "")
         _add_filter_value(intent, "beam_angle", beam_value, "regex", confidence=0.9, hard=True)
         break
 
@@ -2535,27 +2512,6 @@ def _make_relaxed_intent(intent, stage):
             relaxed["sort_by"] = ""
         note = "Fell back to strongest query and hard constraints only."
 
-    if stage == 3:
-        # Even the user's explicit specs produced too few hits (e.g. that exact
-        # wattage+CCT+IP combo barely exists). Demote the hard SPEC constraints to
-        # soft so they boost instead of exclude — but keep category/brand/product
-        # type hard so we still stay in the right product family.
-        demoted = []
-        hard_set = relaxed["hard_constraints"]["filters"]
-        keep_hard = {"category_list", "brand", "product_type", "item_group", "variant_of"}
-        if isinstance(hard_set, set):
-            for spec_key in list(hard_set):
-                if spec_key not in keep_hard:
-                    hard_set.discard(spec_key)
-                    demoted.append(spec_key)
-        else:
-            relaxed["hard_constraints"]["filters"] = [
-                k for k in hard_set if k in keep_hard
-            ]
-            demoted = [k for k in hard_set if k not in keep_hard]
-        if demoted:
-            note = f"Softened exact specs to widen results: {', '.join(demoted)}"
-
     return relaxed, note
 
 
@@ -2710,37 +2666,18 @@ SOFT_SPEC_RANGE_KEYS = (
 )
 
 
-# Numeric tolerance range that pairs with each string spec. When a spec is a HARD
-# constraint we apply the string value exactly; when it's only an inferred/soft
-# preference we boost on the tolerance range instead.
-_SPEC_PAIRED_RANGE = {
-    "power": "power_value_range",
-    "color_temp": "color_temp_kelvin_range",
-    "ip_rate": "ip_rating_numeric_range",
-}
-
-
-def _split_hard_soft_filters(filters, hard_spec_keys=None):
-    """Split resolved intent filters into HARD constraints (Typesense filter_by)
-    and SOFT boosts (_eval ranking).
-
-    A spec the user EXPLICITLY stated (listed in hard_spec_keys, derived from the
-    intent's hard_constraints) is applied as a hard filter so the result count
-    matches the chip the UI shows — e.g. "3000k spotlights" returns only 3000K
-    spotlights, not all spotlights. Specs that were merely INFERRED (LLM guesses,
-    use-case hints, page context) stay soft so sparse/near-miss data never zeroes
-    out the set — preserving the recall fix. Default-valued ranges are dropped."""
+def _split_hard_soft_filters(filters):
+    """Split resolved intent filters into HARD constraints (sent to Typesense
+    filter_by) and SOFT boosts (sent as _eval ranking). Spec attributes become
+    soft so sparse/near-miss data never zeroes out the result set. Default-valued
+    ranges are dropped entirely (they previously bloated every query with
+    redundant >=0 && <=1e9 clauses)."""
     filters = filters or {}
-    hard_spec_keys = set(hard_spec_keys or ())
     hard = {}
     soft = {}
     for key, value in filters.items():
         if key in SOFT_SPEC_ARRAY_KEYS:
-            if not value:
-                continue
-            if key in hard_spec_keys:
-                hard[key] = value  # user asked for it -> enforce exactly
-            else:
+            if value:
                 soft[key] = value
             continue
         if key in SOFT_SPEC_RANGE_KEYS:
@@ -2758,25 +2695,12 @@ def _split_hard_soft_filters(filters, hard_spec_keys=None):
             continue
         if value:
             hard[key] = value
-
-    # A spec promoted to hard shouldn't ALSO carry its soft tolerance-range boost
-    # (that would re-admit near-misses the hard filter just excluded).
-    for spec_key in hard_spec_keys:
-        paired = _SPEC_PAIRED_RANGE.get(spec_key)
-        if paired:
-            soft.pop(paired, None)
     return hard, soft
 
 
 _CANONICALIZE_FILTER_KEYS = SOFT_SPEC_ARRAY_KEYS + (
     "brand", "category_list", "product_type", "item_group", "variant_of", "warranty",
 )
-# Closed-vocabulary fields: a value MUST be an existing facet to be meaningful, so
-# an unresolved value is dropped (prevents junk filters / un-closable chips).
-# brand, variant_of are open-vocabulary (free-text codes) and keep unknown values.
-_CLOSED_VOCAB_FILTER_KEYS = set(SOFT_SPEC_ARRAY_KEYS) | {
-    "category_list", "product_type", "item_group", "warranty",
-}
 
 
 def _canonicalize_filter_values(filters, vocabulary):
@@ -2784,13 +2708,8 @@ def _canonicalize_filter_values(filters, vocabulary):
     using the Typesense facet vocabulary. The deterministic parser upper-cases
     values ("WHITE", "700MA") but the index stores facet-native casing ("White",
     "700mA"), and Typesense `:=` matching is case-sensitive — so without this the
-    soft-boost (and hard filters) silently fail to match.
-
-    For closed-vocabulary spec/category fields, a value that does NOT resolve to a
-    known facet is DROPPED, not passed through: a junk value (e.g. beam_angle
-    "Wall Washer", or a mangled "36DREE") can only mislead the search and, because
-    it never matches a real applied value, renders an un-removable filter chip in
-    the UI. Open-vocabulary fields (brand/series) keep unknown values as-is."""
+    soft-boost (and hard filters) silently fail to match. Unknown values are kept
+    as-is."""
     known = (vocabulary or {}).get("known_values") or {}
     out = dict(filters or {})
     for key in _CANONICALIZE_FILTER_KEYS:
@@ -2804,15 +2723,10 @@ def _canonicalize_filter_values(filters, vocabulary):
         }
         if not lookup:
             continue
-        drop_unknown = key in _CLOSED_VOCAB_FILTER_KEYS
         canonical = []
         seen = set()
         for value in values:
-            mapped = lookup.get(normalize_text(value))
-            if mapped is None:
-                if drop_unknown:
-                    continue  # junk/non-facet value -> drop it
-                mapped = value  # open vocab -> keep raw
+            mapped = lookup.get(normalize_text(value), value)
             if mapped not in seen:
                 seen.add(mapped)
                 canonical.append(mapped)
@@ -2859,13 +2773,7 @@ def execute_intent_search(intent, page=1, page_length=20, include_inactive=0, fe
     canonical_filters = _canonicalize_filter_values(
         intent.get("filters"), get_ai_search_vocabulary()
     )
-    # Specs the user explicitly stated are hard filters (honor the chip exactly);
-    # inferred specs stay soft. Relaxation (below) clears hard_constraints to widen.
-    hard_spec_keys = [
-        key for key in (intent.get("hard_constraints", {}) or {}).get("filters", [])
-        if key in SOFT_SPEC_ARRAY_KEYS
-    ]
-    hard_filters, soft_boosts = _split_hard_soft_filters(canonical_filters, hard_spec_keys)
+    hard_filters, soft_boosts = _split_hard_soft_filters(canonical_filters)
     soft_boosts = _derive_numeric_boost_ranges(soft_boosts)
     return search_products_v2_impl(
         query=intent.get("query"),
@@ -2932,18 +2840,14 @@ def ai_search_products_v2(
         },
     )
 
-    # Explicit specs are hard filters again (so the count matches the chips), which
-    # means an over-constrained query can now legitimately return too few hits —
-    # relax when zero, or when a multi-constraint query yields very few. SKU lookups
-    # and single-filter queries don't relax (their small counts are correct).
-    found_count = cint(response.get("found"))
-    hard_filter_count = len([
-        k for k in (intent.get("hard_constraints", {}) or {}).get("filters", [])
-    ])
-    weak_results = found_count == 0 or (found_count < 3 and hard_filter_count >= 2)
+    # Specs are now soft boosts, so a small result set is no longer a symptom of
+    # over-constraining — only a genuine ZERO needs relaxation (e.g. the category
+    # itself was empty or the query was too narrow). This avoids the extra serial
+    # Typesense round-trips that the old found<3 trigger fired on every query.
+    weak_results = cint(response.get("found")) == 0
 
     if weak_results:
-        for stage in (1, 2, 3):
+        for stage in (1, 2):
             if intent.get("resolved_intent", {}).get("hard_constraints", {}).get("item_code_hint"):
                 break
             relaxed_intent, note = _make_relaxed_intent(attempts[-1], stage)
