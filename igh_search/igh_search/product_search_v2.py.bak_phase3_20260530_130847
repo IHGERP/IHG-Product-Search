@@ -331,28 +331,11 @@ def get_v2_config():
             conf.get("igh_search_v2_query_roles", DEFAULT_ALLOWED_ROLES)
         ),
         "max_retry_count": cint(conf.get("igh_search_v2_max_retry_count", 3)),
-        # Phase 3 — hybrid (keyword + semantic vector) search. OFF by default;
-        # reads a parallel auto-embedding collection so the live product_v2 and
-        # the /list page are untouched. Flip igh_search_hybrid_enabled to roll out.
-        "hybrid_enabled": cint(conf.get("igh_search_hybrid_enabled", 0)),
-        "hybrid_collection": cstr(
-            conf.get("igh_search_hybrid_collection", "product_v2_hybrid")
-        ).strip()
-        or "product_v2_hybrid",
-        "hybrid_alpha": flt(conf.get("igh_search_hybrid_alpha", 0.7)),
     }
 
 
 def is_dual_write_enabled():
     return bool(get_v2_config()["dual_write"])
-
-
-def is_hybrid_enabled():
-    return bool(get_v2_config()["hybrid_enabled"])
-
-
-def get_hybrid_collection():
-    return get_v2_config()["hybrid_collection"]
 
 
 def is_query_enabled():
@@ -759,7 +742,6 @@ def search_products_v2(
     feature_flag_override=0,
     strict_sort=0,
     soft_boosts=None,
-    use_hybrid=None,
 ):
     ensure_query_access(feature_flag_override=feature_flag_override)
 
@@ -803,26 +785,6 @@ def search_products_v2(
         search_parameters["prefix"] = "true,true,false,false,false,false,false,false,false,false"
         search_parameters["num_typos"] = "0,0,1,1,1,1,1,1,1,1"
 
-    # Phase 3 — hybrid (keyword + semantic vector) search. Only for real free-text
-    # queries (not "*"/SKU browse) and only when the flag + caller opt-in are on.
-    # Prepend the auto-embedding vector field so Typesense embeds `q` server-side
-    # and rank-fuses keyword + semantic; keep positional param strings aligned.
-    target_collection = get_default_collection()
-    if (
-        cint(use_hybrid)
-        and is_hybrid_enabled()
-        and query_text not in ("", "*")
-        and not sku_like
-    ):
-        target_collection = get_hybrid_collection()
-        search_parameters["query_by"] = "embedding," + search_parameters["query_by"]
-        search_parameters["query_by_weights"] = "1," + search_parameters["query_by_weights"]
-        search_parameters["exclude_fields"] = "embedding"
-        if "prefix" in search_parameters:
-            search_parameters["prefix"] = "false," + search_parameters["prefix"]
-        if "num_typos" in search_parameters:
-            search_parameters["num_typos"] = "0," + search_parameters["num_typos"]
-
     log_search_request(
         "request",
         {
@@ -840,7 +802,7 @@ def search_products_v2(
         },
     )
 
-    response = client.collections[target_collection].documents.search(
+    response = client.collections[get_default_collection()].documents.search(
         search_parameters
     )
 

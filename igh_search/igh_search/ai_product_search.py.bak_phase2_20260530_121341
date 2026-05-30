@@ -1606,40 +1606,14 @@ def extract_deterministic_intent(preprocessed_message, vocabulary):
     return intent
 
 
-ENQUIRY_SPEC_UNIT_PATTERN = re.compile(
-    r"\b\d+(?:\.\d+)?\s*(?:w|watt|watts|kw|ma|a|vdc|vac|kv|v|lm|lumens?|mm|cm|deg|degree|°)\b"
-    r"|\bip\s?\d{2}\b"
-    r"|\b\d{3,5}\s?k\b"
-    r"|\b\d+(?:\.\d+)?\s?-\s?\d+(?:\.\d+)?\s?(?:ma|w|v|k|a|lm)\b",
-    re.IGNORECASE,
-)
-
-
-def _enquiry_spec_density(preprocessed_message):
-    message = cstr(preprocessed_message.get("normalized_message") or "")
-    return len(ENQUIRY_SPEC_UNIT_PATTERN.findall(message))
-
-
 def needs_model_reasoning(preprocessed_message, deterministic_intent):
-    # Sales users paste raw customer enquiry lines — a product plus many specs,
-    # ranges, voltages and finishes (e.g. "Lumibright Spot light 15 Watts 2700K
-    # Off white 700mA 20.75 VDC IP20"). Those are exactly where the deterministic
-    # regex parser mis-reads ("15 Watts" -> beam 15°), drops voltages/series and
-    # collapses ranges. So fire the model whenever the message is spec-dense /
-    # enquiry-like; keep the cheap deterministic-only path only for short
-    # single-concept browse queries and clean SKU lookups.
-    word_count = cint(preprocessed_message.get("word_count"))
-    spec_hits = _enquiry_spec_density(preprocessed_message)
-    enquiry_like = (
-        spec_hits >= 2
-        or (spec_hits >= 1 and word_count >= 4)
-        or word_count >= 6
-    )
-    if enquiry_like:
-        return True
     if deterministic_intent["intent_class"] == "sku_lookup":
         return False
-    return word_count >= 4
+    if len(deterministic_intent["signals"]) >= 3:
+        return False
+    if deterministic_intent["filters"]["in_stock"] and deterministic_intent["query"]:
+        return False
+    return preprocessed_message["word_count"] >= 4
 
 
 def _build_model_messages(message, page_context, vocabulary, deterministic_intent):
@@ -1708,33 +1682,6 @@ def _build_model_messages(message, page_context, vocabulary, deterministic_inten
                 },
             },
         },
-        {
-            "message": "Lumibright Spot light 15 Watts 2700K with Off white colour 700mA 20.75 VDC IP20",
-            "note": "Raw customer enquiry. Extract EVERY spec. '15 Watts' is POWER (15W), never a beam angle. Map the brand to a known value. query is empty because every token was mapped to a filter.",
-            "response": {
-                "query": "",
-                "sort_by": "",
-                "filters": {
-                    "brand": ["LUMIBRIGHT"],
-                    "category_list": ["SPOT LIGHT"],
-                    "power": ["15W"],
-                    "color_temp": ["2700K"],
-                    "body_finish": ["WHITE"],
-                    "output_current": ["700MA"],
-                    "output_voltage": ["20V"],
-                    "ip_rate": ["IP20"],
-                },
-            },
-        },
-        {
-            "message": "LED Driver LCA 60W 900-1750mA",
-            "note": "'LCA' is a product series/model code and '900-1750mA' is a distinctive selectable-current range: keep BOTH in query so they match by product name. Map the clean specs to filters; do not drop the lower bound of the range.",
-            "response": {
-                "query": "LCA 900-1750mA",
-                "sort_by": "",
-                "filters": {"category_list": ["LED DRIVERS"], "power": ["60W"]},
-            },
-        },
     ]
 
     system_prompt = f"""
@@ -1753,15 +1700,6 @@ Domain rules:
 - For terms like driver, strip, profile, track, panel, batten, flood, spot, and emergency, keep the query aligned to the lighting product family rather than generic meanings.
 - If a product-family noun (spotlight, downlight, panel light, track light, flood light, high bay, batten, wall washer, etc.) matches a value in known_filter_values.category_list, put that EXACT known category value into filters.category_list and leave it OUT of query. Use query only for free-text not already captured by a structured filter.
 - Map spec wording to filters: "warm white"≈3000K, "cool white"≈4000K, "daylight"≈6000K; "waterproof"/"weatherproof"/"outdoor"≈IP65 or higher. Prefer the matching range field when the user implies a bound (e.g. "below 10w", "under 500 aed").
-
-Customer enquiry mode (IMPORTANT):
-- Sales users frequently paste a full customer enquiry line that names a product and many specifications at once (brand, wattage, CCT, IP rating, beam angle, output current, input/output voltage, body finish/colour, lumen, mounting). Extract EVERY specification you can recognise into filters.
-- A number followed by W/Watt/Watts is POWER (e.g. "15 Watts" -> power ["15W"]). NEVER read a wattage as a beam angle. Only set beam_angle when the value is explicitly in degrees ("24°", "24 deg", "wide beam"). If the deterministic_seed tagged a wattage as beam_angle, drop that beam_angle.
-- Values in V/VDC/VAC are voltage -> output_voltage (driver/strip output) or input_voltage as the wording implies. Values in mA/A are output_current.
-- For a value RANGE such as "900-1750mA" or "10-40V", keep the original range token in the query so it still matches the product name; never silently drop the lower bound.
-- Map brand names to filters.brand using a known value. Product SERIES or MODEL codes (e.g. LCA, LCAI, LBE2077) are NOT in the known filter values — keep them in the query so they match the product name/series. Also keep in the query anything you could not confidently map to a filter.
-- Remove from the query every spec token you DID map into a filter. The query should hold only product/series free-text (or be empty when everything was mapped).
-- Product vs context: the product is what the customer wants to BUY. Phrases like "light for a bathroom mirror", "lighting for a garden", "lamp for a desk" describe a LIGHT for a location/surface — do NOT map the surface to category_list (a "light for a mirror" is NOT category MIRRORS). Treat the location/surface as a use-case hint and keep the lighting noun (light, lamp, etc.) in the query or a lighting category.
 
 General rules:
 - Use ONLY the current V2 contract field names.
@@ -2171,26 +2109,8 @@ def merge_structured_intent(deterministic_intent, ai_response):
     if not ai_response:
         return merged
 
-    ai_filters = ai_response.get("filters") or {}
-    ai_has_structure = any(
-        ai_filters.get(key) for key in ("category_list", "brand", "product_type")
-    )
-    # If the model recognised a real product+spec enquiry, it is NOT a bare SKU
-    # lookup — clear the deterministic SKU hint so it stops forcing item-code mode
-    # (and stops blocking the query/relaxation logic below).
-    if ai_has_structure and merged.get("item_code_hint"):
-        merged["item_code_hint"] = ""
-        if isinstance(merged.get("hard_constraints"), dict):
-            merged["hard_constraints"]["item_code_hint"] = False
-        if merged.get("intent_class") == "sku_lookup":
-            merged["intent_class"] = "spec_match"
-
-    # The model is the authority on the free-text query in enquiry mode: when it
-    # fired it has already lifted every recognised spec into filters, so trust its
-    # (often empty) query instead of falling back to the spec-polluted
-    # deterministic query.
-    if not merged.get("item_code_hint"):
-        merged["query"] = cstr(ai_response.get("query") or "").strip()
+    if ai_response.get("query") and not merged.get("item_code_hint"):
+        merged["query"] = ai_response["query"]
     if ai_response.get("sort_by") and not merged.get("sort_by"):
         merged["sort_by"] = ai_response["sort_by"]
 
@@ -2679,83 +2599,10 @@ def _split_hard_soft_filters(filters):
     return hard, soft
 
 
-_CANONICALIZE_FILTER_KEYS = SOFT_SPEC_ARRAY_KEYS + (
-    "brand", "category_list", "product_type", "item_group", "variant_of", "warranty",
-)
-
-
-def _canonicalize_filter_values(filters, vocabulary):
-    """Remap each filter value to the exact casing/spelling stored in the index,
-    using the Typesense facet vocabulary. The deterministic parser upper-cases
-    values ("WHITE", "700MA") but the index stores facet-native casing ("White",
-    "700mA"), and Typesense `:=` matching is case-sensitive — so without this the
-    soft-boost (and hard filters) silently fail to match. Unknown values are kept
-    as-is."""
-    known = (vocabulary or {}).get("known_values") or {}
-    out = dict(filters or {})
-    for key in _CANONICALIZE_FILTER_KEYS:
-        values = out.get(key)
-        if not isinstance(values, list) or not values:
-            continue
-        lookup = {
-            normalize_text(known_value): known_value
-            for known_value in (known.get(key) or [])
-            if cstr(known_value).strip()
-        }
-        if not lookup:
-            continue
-        canonical = []
-        seen = set()
-        for value in values:
-            mapped = lookup.get(normalize_text(value), value)
-            if mapped not in seen:
-                seen.add(mapped)
-                canonical.append(mapped)
-        out[key] = canonical
-    return out
-
-
-def _leading_number(value):
-    match = re.search(r"(\d+(?:\.\d+)?)", cstr(value or ""))
-    return flt(match.group(1)) if match else None
-
-
-def _derive_numeric_boost_ranges(soft_boosts):
-    """Derive numeric tolerance ranges (power/CCT/IP) from the string spec values
-    when the parser didn't already set them. The numeric range conditions are the
-    highest-priority, case-free boost signals, so without this a string-only spec
-    like power ["15W"] is out-ranked by a broad CCT tolerance band and never leads
-    the result set."""
-    soft = dict(soft_boosts or {})
-
-    def needs(range_key):
-        value = soft.get(range_key)
-        return not (isinstance(value, dict) and not _is_default_range_value(range_key, value))
-
-    if needs("power_value_range"):
-        values = [n for n in (_leading_number(v) for v in soft.get("power") or []) if n]
-        if values:
-            # ±10% tolerance keeps the asked wattage distinct from neighbours.
-            soft["power_value_range"] = {"min": min(values) * 0.9, "max": max(values) * 1.1}
-    if needs("color_temp_kelvin_range"):
-        values = [n for n in (_leading_number(v) for v in soft.get("color_temp") or []) if n]
-        if values:
-            soft["color_temp_kelvin_range"] = {"min": min(values) - 300, "max": max(values) + 300}
-    if needs("ip_rating_numeric_range"):
-        values = [n for n in (_leading_number(v) for v in soft.get("ip_rate") or []) if n]
-        if values:
-            soft["ip_rating_numeric_range"] = {"min": min(values), "max": max(values)}
-    return soft
-
-
 def execute_intent_search(intent, page=1, page_length=20, include_inactive=0, feature_flag_override=0):
     from igh_search.igh_search.product_search_v2 import search_products_v2 as search_products_v2_impl
 
-    canonical_filters = _canonicalize_filter_values(
-        intent.get("filters"), get_ai_search_vocabulary()
-    )
-    hard_filters, soft_boosts = _split_hard_soft_filters(canonical_filters)
-    soft_boosts = _derive_numeric_boost_ranges(soft_boosts)
+    hard_filters, soft_boosts = _split_hard_soft_filters(intent.get("filters"))
     return search_products_v2_impl(
         query=intent.get("query"),
         filters=hard_filters,
@@ -2767,7 +2614,6 @@ def execute_intent_search(intent, page=1, page_length=20, include_inactive=0, fe
         feature_flag_override=feature_flag_override,
         strict_sort=1 if intent.get("sort_by") else 0,
         soft_boosts=soft_boosts,
-        use_hybrid=1,  # AI search opts in; the igh_search_hybrid_enabled flag gates actual use
     )
 
 

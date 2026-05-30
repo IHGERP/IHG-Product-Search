@@ -2767,7 +2767,6 @@ def execute_intent_search(intent, page=1, page_length=20, include_inactive=0, fe
         feature_flag_override=feature_flag_override,
         strict_sort=1 if intent.get("sort_by") else 0,
         soft_boosts=soft_boosts,
-        use_hybrid=1,  # AI search opts in; the igh_search_hybrid_enabled flag gates actual use
     )
 
 

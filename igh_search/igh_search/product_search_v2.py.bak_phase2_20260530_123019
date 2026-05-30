@@ -331,28 +331,11 @@ def get_v2_config():
             conf.get("igh_search_v2_query_roles", DEFAULT_ALLOWED_ROLES)
         ),
         "max_retry_count": cint(conf.get("igh_search_v2_max_retry_count", 3)),
-        # Phase 3 — hybrid (keyword + semantic vector) search. OFF by default;
-        # reads a parallel auto-embedding collection so the live product_v2 and
-        # the /list page are untouched. Flip igh_search_hybrid_enabled to roll out.
-        "hybrid_enabled": cint(conf.get("igh_search_hybrid_enabled", 0)),
-        "hybrid_collection": cstr(
-            conf.get("igh_search_hybrid_collection", "product_v2_hybrid")
-        ).strip()
-        or "product_v2_hybrid",
-        "hybrid_alpha": flt(conf.get("igh_search_hybrid_alpha", 0.7)),
     }
 
 
 def is_dual_write_enabled():
     return bool(get_v2_config()["dual_write"])
-
-
-def is_hybrid_enabled():
-    return bool(get_v2_config()["hybrid_enabled"])
-
-
-def get_hybrid_collection():
-    return get_v2_config()["hybrid_collection"]
 
 
 def is_query_enabled():
@@ -675,76 +658,41 @@ def _eval_quote(value):
     return "`" + cstr(value).replace("`", "") + "`"
 
 
-# Priority order for spec matches. Typesense `_eval([(f):w, ...])` is FIRST-MATCH-
-# WINS, not additive, so conditions are emitted in strict priority order with
-# strictly-descending weights: an item is scored by the single most important spec
-# it matches. The numeric range specs (case-free, reliable) outrank string specs;
-# sellability is the lowest tier so a precise spec match always beats a merely
-# sellable but non-matching item. The Python compatibility reranker
-# (calculate_ai_compatibility_score) then does the fine-grained additive ordering
-# within the fetched page.
-SOFT_BOOST_PRIORITY_RANGE = ("power_value_range", "color_temp_kelvin_range", "ip_rating_numeric_range")
-SOFT_BOOST_PRIORITY_STRING = (
-    "power", "color_temp", "ip_rate", "output_current", "output_voltage",
-    "input_voltage", "lamp_type", "beam_angle", "mounting", "body_finish",
-    "material", "lumen_output",
-)
-
-
-def _soft_range_expr(field, rng):
-    if not isinstance(rng, dict):
-        return ""
-    parts = []
-    low = rng.get("min")
-    high = rng.get("max")
-    if low not in (None, "") and flt(low) > 0:
-        parts.append(f"{field}:>={flt(low)}")
-    if high not in (None, "") and flt(high) < SOFT_RANGE_SENTINEL_MAX:
-        parts.append(f"{field}:<={flt(high)}")
-    return " && ".join(parts)
-
-
 def build_soft_boost_clause(soft_boosts):
     """Build a Typesense `_eval([...])` sort expression that BOOSTS (never filters)
-    docs matching the user's spec preferences, plus a final sellability tier.
-    Fields absent on a doc simply don't match -> no boost, doc is kept. Conditions
-    are ordered by importance with descending weights because `_eval` is
-    first-match-wins (see note above)."""
+    docs which match the user's spec preferences and which are sellable. Fields
+    absent on a doc simply don't match a condition -> no boost, doc is kept. The
+    AI layer routes sparse spec attributes here instead of into filter_by."""
     if not isinstance(soft_boosts, dict):
         return ""
-
-    # Collect active spec conditions in priority order.
-    range_conditions = []
-    for range_key in SOFT_BOOST_PRIORITY_RANGE:
-        expr = _soft_range_expr(SOFT_BOOST_RANGE_FIELDS[range_key], soft_boosts.get(range_key))
-        if expr:
-            range_conditions.append(expr)
-
-    string_conditions = []
-    for field in SOFT_BOOST_PRIORITY_STRING:
+    conditions = []
+    # Sellability: real catalog items (a price OR some stock) float above the
+    # zero-price & zero-stock project/custom/signage items. `||` is deliberate so
+    # a genuine, temporarily out-of-stock product is NOT down-ranked with junk.
+    conditions.append("(rate:>0 || stock:>0):2")
+    for field in SOFT_BOOST_STRING_FIELDS:
         values = _unique_strings(soft_boosts.get(field) or [])
-        if values:
-            joined = ",".join(_eval_quote(value) for value in values)
-            string_conditions.append(f"{field}:=[{joined}]")
-
-    tiers = []  # (expr, weight)
-    # Top tier: an item matching ALL numeric specs at once (the strongest signal).
-    if len(range_conditions) >= 2:
-        tiers.append(("(" + " && ".join(range_conditions) + ")", 60))
-
-    weight = 50
-    for expr in range_conditions:
-        tiers.append((f"({expr})", weight))
-        weight -= 4
-    for expr in string_conditions:
-        tiers.append((f"({expr})", max(weight, 6)))
-        weight -= 4
-    # Sellability is the lowest tier: only decides order among items that match no
-    # spec at all (so junk with rate=0 & stock=0 sinks, nothing is hidden).
-    tiers.append(("(rate:>0 || stock:>0)", 2))
-
-    body = ", ".join(f"{expr}:{w}" for expr, w in tiers)
-    return f"_eval([{body}]):desc"
+        if not values:
+            continue
+        joined = ",".join(_eval_quote(value) for value in values)
+        conditions.append(f"({field}:=[{joined}]):3")
+    for range_key, field in SOFT_BOOST_RANGE_FIELDS.items():
+        rng = soft_boosts.get(range_key)
+        if not isinstance(rng, dict):
+            continue
+        parts = []
+        low = rng.get("min")
+        high = rng.get("max")
+        if low not in (None, "") and flt(low) > 0:
+            parts.append(f"{field}:>={flt(low)}")
+        if high not in (None, "") and flt(high) < SOFT_RANGE_SENTINEL_MAX:
+            parts.append(f"{field}:<={flt(high)}")
+        if parts:
+            conditions.append(f"({' && '.join(parts)}):3")
+    # Non-AI callers pass soft_boosts=None and are filtered out by the isinstance
+    # guard above; the AI path always passes a dict, so even a spec-less query
+    # still gets the sellability boost (junk sinks, nothing is hidden).
+    return "_eval([" + ", ".join(conditions) + "]):desc"
 
 
 def search_products_v2(
@@ -759,7 +707,6 @@ def search_products_v2(
     feature_flag_override=0,
     strict_sort=0,
     soft_boosts=None,
-    use_hybrid=None,
 ):
     ensure_query_access(feature_flag_override=feature_flag_override)
 
@@ -803,26 +750,6 @@ def search_products_v2(
         search_parameters["prefix"] = "true,true,false,false,false,false,false,false,false,false"
         search_parameters["num_typos"] = "0,0,1,1,1,1,1,1,1,1"
 
-    # Phase 3 — hybrid (keyword + semantic vector) search. Only for real free-text
-    # queries (not "*"/SKU browse) and only when the flag + caller opt-in are on.
-    # Prepend the auto-embedding vector field so Typesense embeds `q` server-side
-    # and rank-fuses keyword + semantic; keep positional param strings aligned.
-    target_collection = get_default_collection()
-    if (
-        cint(use_hybrid)
-        and is_hybrid_enabled()
-        and query_text not in ("", "*")
-        and not sku_like
-    ):
-        target_collection = get_hybrid_collection()
-        search_parameters["query_by"] = "embedding," + search_parameters["query_by"]
-        search_parameters["query_by_weights"] = "1," + search_parameters["query_by_weights"]
-        search_parameters["exclude_fields"] = "embedding"
-        if "prefix" in search_parameters:
-            search_parameters["prefix"] = "false," + search_parameters["prefix"]
-        if "num_typos" in search_parameters:
-            search_parameters["num_typos"] = "0," + search_parameters["num_typos"]
-
     log_search_request(
         "request",
         {
@@ -840,7 +767,7 @@ def search_products_v2(
         },
     )
 
-    response = client.collections[target_collection].documents.search(
+    response = client.collections[get_default_collection()].documents.search(
         search_parameters
     )
 
