@@ -44,7 +44,7 @@
  ],
  "fields": [
   {"fieldname": "product_section", "fieldtype": "Section Break", "label": "Product"},
-  {"fieldname": "item_code", "fieldtype": "Link", "label": "Item Code", "options": "Item", "in_list_view": 1, "reqd": 1},
+  {"fieldname": "item_code", "fieldtype": "Link", "label": "Item Code", "options": "Item", "in_list_view": 1},
   {"fieldname": "item_name_snapshot", "fieldtype": "Data", "label": "Item Name Snapshot", "in_list_view": 1},
   {"fieldname": "brand", "fieldtype": "Data", "label": "Brand"},
   {"fieldname": "category_list", "fieldtype": "Data", "label": "Category"},

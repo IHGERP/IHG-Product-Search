@@ -191,6 +191,56 @@ def _query_response(doc, after=None, include_messages=True):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Realtime (publish_realtime) — inert until a socket client is connected.
+# Safe on Frappe Cloud: events are pushed to redis_socketio and dropped if no
+# subscriber. Every publish is wrapped so a realtime hiccup never breaks the
+# message write.
+# ──────────────────────────────────────────────────────────────────────────────
+def _admin_user_ids():
+    """Enabled users holding an admin role. Cached ~60s to avoid a Has Role scan
+    on every message."""
+    cache = frappe.cache()
+    cached = cache.get_value("pq_admin_user_ids")
+    if cached is not None:
+        return cached
+    try:
+        rows = frappe.get_all(
+            "Has Role",
+            filters={"role": ["in", list(ADMIN_ROLES)], "parenttype": "User"},
+            pluck="parent",
+            distinct=True,
+        )
+    except Exception:
+        rows = []
+    users = list({u for u in rows if u and u != "Guest"})
+    cache.set_value("pq_admin_user_ids", users, expires_in_sec=60)
+    return users
+
+
+def _thread_recipients(doc):
+    """The reporter + every admin. Per-user realtime rooms enforce exactly the
+    same visibility as ``_assert_can_view``."""
+    users = set(_admin_user_ids())
+    if doc.reporter_user:
+        users.add(doc.reporter_user)
+    users.discard("Guest")
+    return users
+
+
+def _publish_to_recipients(event, payload, doc, exclude=None):
+    try:
+        for user in _thread_recipients(doc):
+            if exclude and user == exclude:
+                continue
+            # after_commit=True for persisted events so a recipient never gets an
+            # id it cannot fetch yet.
+            frappe.publish_realtime(event=event, message=payload, user=user, after_commit=True)
+    except Exception:
+        # Realtime is best-effort; the slow reconcile poll self-heals any miss.
+        pass
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Message + bookkeeping
 # ──────────────────────────────────────────────────────────────────────────────
 def _append_message(doc, message, attachment="", message_type="message", sender_role=None, system=False):
@@ -233,6 +283,19 @@ def _append_message(doc, message, attachment="", message_type="message", sender_
         doc.unread_for_admin = (doc.unread_for_admin or 0) + 1
         if doc.status == "awaiting_reporter":
             doc.status = "in_progress"
+
+    # Push the new message to the reporter + admins (fires after commit).
+    payload = {
+        "query": doc.name,
+        "message": _serialize_message(msg.as_dict()),
+        "status": doc.status,
+        "stage": doc.stage,
+        "last_message_at": cstr(doc.last_message_at) or None,
+        "last_message_preview": doc.last_message_preview,
+        "unread_for_reporter": doc.unread_for_reporter or 0,
+        "unread_for_admin": doc.unread_for_admin or 0,
+    }
+    _publish_to_recipients("product_query_message", payload, doc)
     return msg
 
 
@@ -243,10 +306,10 @@ def _append_message(doc, message, attachment="", message_type="message", sender_
 def create_product_query(**kwargs):
     _require_login()
 
+    # item_code is optional: with it the thread is a product query, without it
+    # it is a general "chat with the team" thread.
     item_code = _normalize_text(kwargs.get("item_code"))
-    if not item_code:
-        frappe.throw(_("item_code is required"))
-    if not frappe.db.exists("Item", item_code):
+    if item_code and not frappe.db.exists("Item", item_code):
         frappe.throw(_("Item {0} was not found").format(item_code))
 
     message = _normalize_text(kwargs.get("message")) or _normalize_text(kwargs.get("description"))
@@ -258,17 +321,27 @@ def create_product_query(**kwargs):
 
     user_id = frappe.session.user
     user_doc = frappe.get_doc("User", user_id)
-    item_name = _normalize_text(kwargs.get("item_name_snapshot")) or frappe.db.get_value("Item", item_code, "item_name") or item_code
+    subject = _normalize_text(kwargs.get("subject"))
+    if item_code:
+        item_name = (
+            _normalize_text(kwargs.get("item_name_snapshot"))
+            or frappe.db.get_value("Item", item_code, "item_name")
+            or item_code
+        )
+    else:
+        # General chat: no product. Use the subject (or first words of the
+        # message) as the human-readable thread title.
+        item_name = subject or (message[:80].strip()) or "General chat"
 
     doc = frappe.get_doc(
         {
             "doctype": QUERY_DOCTYPE,
-            "item_code": item_code,
+            "item_code": item_code or None,
             "item_name_snapshot": item_name,
             "brand": _normalize_text(kwargs.get("brand")),
             "category_list": _normalize_text(kwargs.get("category_list")),
             "website_image_url": _normalize_text(kwargs.get("website_image_url")),
-            "subject": _normalize_text(kwargs.get("subject")) or item_name,
+            "subject": subject or item_name,
             "query_type": query_type,
             "affected_field": _normalize_text(kwargs.get("affected_field")),
             "severity": severity,
@@ -466,6 +539,49 @@ def mark_product_query_read(query_id=None, **kwargs):
 
 
 @frappe.whitelist(methods=["POST"])
+def notify_product_query_typing(query_id=None, is_typing=1, **kwargs):
+    """Ephemeral typing indicator — no DB write, just a realtime fan-out to the
+    other participants. No-op cost when no socket is connected."""
+    _require_login()
+    query_id = query_id or kwargs.get("query_id")
+    if not query_id:
+        frappe.throw(_("query_id is required"))
+
+    doc = frappe.get_doc(QUERY_DOCTYPE, query_id)
+    _assert_can_view(doc)
+
+    raw = is_typing if is_typing is not None else kwargs.get("is_typing")
+    typing = cstr(raw).strip().lower() in {"1", "true"}
+    payload = {
+        "query": doc.name,
+        "side": _caller_side(doc),
+        "user": frappe.session.user,
+        "sender_name": frappe.db.get_value("User", frappe.session.user, "full_name") or frappe.session.user,
+        "is_typing": typing,
+    }
+    try:
+        for user in _thread_recipients(doc):
+            if user == frappe.session.user:
+                continue
+            frappe.publish_realtime(event="product_query_typing", message=payload, user=user, after_commit=False)
+    except Exception:
+        pass
+    return {"ok": True}
+
+
+@frappe.whitelist(methods=["GET", "POST"])
+def get_socket_ticket(**kwargs):
+    """Mint a short-lived ticket bound to the logged-in user. Used only by the
+    optional realtime socket gateway to authenticate a handshake without relying
+    on a cross-site cookie. Harmless when no gateway is configured."""
+    _require_login()
+    user = frappe.session.user
+    ticket = frappe.generate_hash(length=48)
+    frappe.cache().set_value("pq_socket_ticket:" + ticket, user, expires_in_sec=30)
+    return {"ticket": ticket, "user": user, "expires_in": 30}
+
+
+@frappe.whitelist(methods=["POST"])
 def escalate_product_query_to_ticket(query_id=None, **kwargs):
     _require_login()
     _assert_admin()
@@ -609,10 +725,11 @@ def reopen_product_query(query_id=None, reason=None, **kwargs):
 
 @frappe.whitelist(methods=["GET", "POST"])
 def get_product_query_rankings(period_days=30, **kwargs):
-    """Super-admin agent leaderboard: volume, SLA, and solution ratings."""
+    """Agent leaderboard: volume, SLA, and solution ratings. Open to the product
+    team (Item Manager / System Manager)."""
     _require_login()
-    if not _is_super_admin():
-        frappe.throw(_("Only super admins can view rankings."), frappe.PermissionError)
+    if not _is_admin():
+        frappe.throw(_("Only the product team can view rankings."), frappe.PermissionError)
 
     try:
         period_days = int(period_days or kwargs.get("period_days") or 30)

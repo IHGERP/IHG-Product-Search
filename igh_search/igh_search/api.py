@@ -2382,3 +2382,15 @@ def _fetch_product_bundles(current_code, preview_limit):
         )
 
     return {"total": len(items), "items": items}
+
+
+@frappe.whitelist()
+def notify_product_query_typing(**kwargs):
+    from igh_search.igh_search.product_query import notify_product_query_typing as _f
+    return _f(**_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist()
+def get_socket_ticket(**kwargs):
+    from igh_search.igh_search.product_query import get_socket_ticket as _f
+    return _f(**_sanitize_framework_kwargs(kwargs))
