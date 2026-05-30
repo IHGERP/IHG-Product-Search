@@ -19,11 +19,9 @@ from igh_search.igh_search.product_search_v2 import (
     create_sync_log,
     create_typesense_client,
     delete_typesense_documents,
-    get_hybrid_collection,
     get_product_v2_schema,
     get_v2_config,
     is_dual_write_enabled,
-    is_hybrid_enabled,
     sync_typesense_synonyms,
     update_sync_log,
 )
@@ -1008,42 +1006,6 @@ def get_variant_codes_for_parent(parent_code):
     return frappe.get_all("Item", filters={"variant_of": parent_code}, pluck="name")
 
 
-def _hybrid_incremental_sync(client, upsert_docs, delete_codes):
-    """Phase 3 — keep the semantic collection (product_v2_hybrid) in step with the
-    incremental product_v2 writes. The collection has an auto-embedding field, so
-    a plain upsert re-embeds the changed doc server-side; no vector work here.
-    Only runs when the hybrid flag is on, and never breaks the main sync — a
-    failure is logged and swallowed (the bulk re-embed / next edit will heal it).
-    NOTE: this is deliberately NOT wired into the full-sync job, because that path
-    recreate_collection()s its targets, which would drop the embedding field and
-    force a multi-hour re-embed."""
-    if not is_hybrid_enabled():
-        return
-    collection = get_hybrid_collection()
-    try:
-        if delete_codes:
-            delete_typesense_documents(client, collection, delete_codes)
-        if upsert_docs:
-            # Strip any stale stored vector so Typesense re-embeds from text.
-            clean_docs = [
-                {k: v for k, v in doc.items() if k != "embedding"} for doc in upsert_docs
-            ]
-            client.collections[collection].documents.import_(
-                clean_docs, {"action": "upsert"}
-            )
-    except Exception:
-        _log_sync_observability(
-            "warning",
-            "hybrid_incremental_sync_failed",
-            {
-                "collection": collection,
-                "upsert_count": len(upsert_docs or []),
-                "delete_count": len(delete_codes or []),
-                "error": frappe.get_traceback()[:500],
-            },
-        )
-
-
 def update_product_schema_data_qr_job(self_data, retry_count=0, log_name=None):
     update_sync_log(log_name, "Running", retry_count=retry_count, started=True)
     client = create_client()
@@ -1074,28 +1036,15 @@ def update_product_schema_data_qr_job(self_data, retry_count=0, log_name=None):
 
         if is_dual_write_enabled():
             active_v2_codes = {doc["item_code"] for doc in payload["v2"]}
-            inactive_v2_codes = [
-                item_code for item_code in affected_item_codes if item_code not in active_v2_codes
-            ]
             if doctype == "Item" and event_method == "on_trash":
                 delete_typesense_documents(
                     client,
                     PRODUCT_V2_COLLECTION,
-                    inactive_v2_codes,
+                    [item_code for item_code in affected_item_codes if item_code not in active_v2_codes],
                 )
             update_value_item_wise(
                 payload["v2"], client=client, collection_name=PRODUCT_V2_COLLECTION
             )
-
-            # Phase 3 — mirror the same v2 change into the semantic collection so
-            # hybrid stays fresh. Remove items that fell inactive/were trashed,
-            # upsert (and auto-re-embed) the rest.
-            hybrid_delete_codes = list(inactive_v2_codes)
-            if doctype == "Item" and event_method == "on_trash":
-                deleted_code = self_data.get("item_code") or self_data.get("name")
-                if deleted_code and deleted_code not in hybrid_delete_codes:
-                    hybrid_delete_codes.append(deleted_code)
-            _hybrid_incremental_sync(client, payload["v2"], hybrid_delete_codes)
 
         update_sync_log(log_name, "Success", retry_count=retry_count, finished=True)
     except Exception:

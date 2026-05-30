@@ -113,11 +113,6 @@ def get_similar_products_v2(*args, **kwargs):
     return _impl().get_similar_products_v2(*args, **_sanitize_framework_kwargs(kwargs))
 
 
-
-@frappe.whitelist(allow_guest=True)
-def get_product_alternatives_v2(*args, **kwargs):
-    return _impl().get_product_alternatives_v2(*args, **_sanitize_framework_kwargs(kwargs))
-
 @frappe.whitelist(allow_guest=True)
 def ai_search_products_v2(*args, **kwargs):
     return _impl().ai_search_products_v2(*args, **_sanitize_framework_kwargs(kwargs))
@@ -161,18 +156,3 @@ def run_stock_drift_repair(*args, **kwargs):
 @frappe.whitelist()
 def reindex_stock_for_items(*args, **kwargs):
     return _impl().reindex_stock_for_items(*args, **_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def backfill_item_specs(*args, **kwargs):
-    return _impl().backfill_item_specs(*args, **_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def scan_data_quality(*args, **kwargs):
-    return _impl().scan_data_quality(*args, **_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def product_assistant_chat(*args, **kwargs):
-    return _impl().product_assistant_chat(*args, **_sanitize_framework_kwargs(kwargs))

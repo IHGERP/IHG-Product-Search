@@ -980,6 +980,123 @@ def get_similar_products_v2(item_code, limit=10, include_manual=1, feature_flag_
     return {"item_code": item_code, "results": results[: cint(limit)]}
 
 
+# Complementary category map for cross-sell: what naturally sells WITH what. Used
+# only to seed companion-category candidates; manual related codes always win.
+CROSS_SELL_COMPANION_CATEGORIES = {
+    "STRIP LIGHT": ["LED DRIVERS", "ALUMINIUM PROFILE", "PROFILE", "LIGHTING ACCESSORIES"],
+    "NEON FLEX": ["LED DRIVERS", "LIGHTING ACCESSORIES"],
+    "LED DRIVERS": ["STRIP LIGHT", "NEON FLEX", "LIGHTING ACCESSORIES"],
+    "ALUMINIUM PROFILE": ["STRIP LIGHT", "LED DRIVERS", "LIGHTING ACCESSORIES"],
+    "TRACK LIGHT": ["LIGHTING ACCESSORIES", "LED DRIVERS"],
+    "SPOT LIGHT": ["LED DRIVERS", "LIGHTING ACCESSORIES"],
+    "DOWN LIGHT": ["LED DRIVERS", "LIGHTING ACCESSORIES"],
+    "PENDANT LIGHT": ["BULBS & LAMPS", "LIGHTING ACCESSORIES"],
+    "CHANDELIERS": ["BULBS & LAMPS", "LIGHTING ACCESSORIES"],
+}
+
+
+def get_product_alternatives_v2(item_code, mode="alternatives", limit=8, in_stock_only=1, feature_flag_override=0):
+    """Sales-facing alternatives & cross-sell.
+
+    mode="alternatives": closest EQUIVALENT products in the SAME category (for
+      "this is out of stock / too expensive, what else fits?"). Semantic neighbours
+      via hybrid (when enabled) + spec-closeness, optionally in-stock only.
+    mode="cross_sell": COMPLEMENTARY products (driver for a strip, diffuser for a
+      profile). Manual related/bought-together codes first, then semantic
+      neighbours from companion categories.
+    """
+    ensure_query_access(feature_flag_override=feature_flag_override)
+    source = get_product_document(item_code, include_inactive=1)
+    if not source:
+        frappe.throw(_("Item not indexed in product_v2"))
+
+    mode = cstr(mode or "alternatives").strip().lower()
+    limit = max(min(cint(limit) or 8, 30), 1)
+    client = create_typesense_client()
+    results = []
+    seen = {item_code}
+
+    # Manual relationships always lead (curated by the product team).
+    manual_codes = (
+        source.get("manual_alternative_codes", []) if mode == "alternatives"
+        else source.get("manual_related_codes", [])
+    )
+    for hit in get_documents_by_codes(manual_codes, include_inactive=0):
+        code = hit.get("item_code")
+        if code and code not in seen:
+            seen.add(code)
+            results.append({"reason": "manual", "score": 100, "document": hit})
+
+    # Build the candidate filter by mode.
+    filter_clauses = [f'item_code:!={item_code}', "is_active:=1"]
+    if cint(in_stock_only) and mode == "alternatives":
+        filter_clauses.append("in_stock:=1")
+
+    source_category = cstr(source.get("category_list") or "")
+    if mode == "alternatives":
+        if source_category:
+            filter_clauses.append(f'category_list:="{_escape_filter_value(source_category)}"')
+    else:  # cross_sell -> companion categories, never the same category
+        companions = CROSS_SELL_COMPANION_CATEGORIES.get(source_category.upper(), [])
+        manual_companions = [c for c in companions if c]
+        if manual_companions:
+            joined = ",".join(f'`{c}`' for c in manual_companions)
+            filter_clauses.append(f"category_list:=[{joined}]")
+        elif source_category:
+            filter_clauses.append(f'category_list:!="{_escape_filter_value(source_category)}"')
+
+    # Semantic candidates: use the source's own descriptive text as the query so
+    # hybrid surfaces meaning-similar items; fall back to keyword when hybrid off.
+    seed_text = cstr(source.get("searchable_text") or source.get("item_name") or "*")[:400]
+    search_params = {
+        "q": seed_text,
+        "query_by": "searchable_text,item_name,category_list",
+        "filter_by": " && ".join(filter_clauses),
+        "per_page": max(limit * 5, 25),
+        "page": 1,
+        "sort_by": "_eval([(in_stock:=1 && rate:>0):2]):desc,_text_match:desc,business_score:desc",
+        "include_fields": ",".join(SEARCH_RESULT_FIELDS),
+    }
+    use_hybrid = (
+        is_hybrid_enabled()
+        and seed_text not in ("", "*")
+    )
+    target_collection = get_default_collection()
+    if use_hybrid:
+        target_collection = get_hybrid_collection()
+        search_params["query_by"] = "embedding," + search_params["query_by"]
+        search_params["query_by_weights"] = "2,3,2,1"
+        search_params["exclude_fields"] = "embedding"
+
+    try:
+        response = client.collections[target_collection].documents.search(search_params)
+    except Exception:
+        # Hybrid hiccup -> fall back to keyword on the main collection.
+        search_params.pop("query_by_weights", None)
+        search_params.pop("exclude_fields", None)
+        search_params["query_by"] = "searchable_text,item_name,category_list"
+        response = client.collections[get_default_collection()].documents.search(search_params)
+
+    for hit in response.get("hits", []):
+        document = hit.get("document", {})
+        code = document.get("item_code")
+        if not code or code in seen:
+            continue
+        if mode == "alternatives":
+            score = calculate_similarity_score(source, document)
+            if score <= 0:
+                continue
+            reason = "similar_spec"
+        else:
+            score = 50 + (10 if cint(document.get("in_stock")) else 0)
+            reason = "complementary"
+        seen.add(code)
+        results.append({"reason": reason, "score": score, "document": document})
+
+    results.sort(key=lambda item: item["score"], reverse=True)
+    return {"item_code": item_code, "mode": mode, "results": results[:limit]}
+
+
 def get_documents_by_codes(item_codes, include_inactive=0):
     item_codes = [code for code in item_codes if code]
     if not item_codes:

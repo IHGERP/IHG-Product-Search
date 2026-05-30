@@ -2005,12 +2005,6 @@ def get_similar_products_v2(*args, **kwargs):
     return _f(*args, **_sanitize_framework_kwargs(kwargs))
 
 
-
-@frappe.whitelist(allow_guest=True)
-def get_product_alternatives_v2(*args, **kwargs):
-    from igh_search.igh_search.product_search_v2 import get_product_alternatives_v2 as _f
-    return _f(*args, **_sanitize_framework_kwargs(kwargs))
-
 @frappe.whitelist(allow_guest=True)
 def ai_search_products_v2(*args, **kwargs):
     from igh_search.igh_search.ai_product_search import ai_search_products_v2 as _f
@@ -2400,21 +2394,3 @@ def notify_product_query_typing(**kwargs):
 def get_socket_ticket(**kwargs):
     from igh_search.igh_search.product_query import get_socket_ticket as _f
     return _f(**_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def backfill_item_specs(*args, **kwargs):
-    from igh_search.igh_search.spec_backfill import backfill_item_specs as _f
-    return _f(*args, **_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def scan_data_quality(*args, **kwargs):
-    from igh_search.igh_search.data_quality import scan_data_quality as _f
-    return _f(*args, **_sanitize_framework_kwargs(kwargs))
-
-
-@frappe.whitelist()
-def product_assistant_chat(*args, **kwargs):
-    from igh_search.igh_search.product_assistant import product_assistant_chat as _f
-    return _f(*args, **_sanitize_framework_kwargs(kwargs))

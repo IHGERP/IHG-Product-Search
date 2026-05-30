@@ -2185,6 +2185,25 @@ def merge_structured_intent(deterministic_intent, ai_response):
         if merged.get("intent_class") == "sku_lookup":
             merged["intent_class"] = "spec_match"
 
+    # Product-vs-context disagreement: the deterministic family-matcher hard-locks
+    # category_list from any matching word (e.g. "mirror" -> MIRRORS). When the LLM
+    # fired and returned NO category of its own, it judged that word to be context
+    # ("light FOR a mirror"), not the product. A hard category lock would trap the
+    # (hybrid) search inside the wrong category, so demote it hard->soft: keep it as
+    # a gentle boost but let semantic ranking surface the actual lights.
+    det_categories = list(merged.get("filters", {}).get("category_list") or [])
+    if det_categories and not ai_filters.get("category_list"):
+        hc = merged.get("hard_constraints") or {}
+        hard_filter_set = hc.get("filters")
+        if isinstance(hard_filter_set, set):
+            hard_filter_set.discard("category_list")
+        elif isinstance(hard_filter_set, (list, tuple)):
+            hc["filters"] = [f for f in hard_filter_set if f != "category_list"]
+        merged["filters"]["category_list"] = []
+        merged["explanation_parts"].append(
+            "Treated a location/surface term as context, not a product category."
+        )
+
     # The model is the authority on the free-text query in enquiry mode: when it
     # fired it has already lifted every recognised spec into filters, so trust its
     # (often empty) query instead of falling back to the spec-polluted
