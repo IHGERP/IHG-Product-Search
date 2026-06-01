@@ -176,3 +176,13 @@ def scan_data_quality(*args, **kwargs):
 @frappe.whitelist()
 def product_assistant_chat(*args, **kwargs):
     return _impl().product_assistant_chat(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(allow_guest=True)
+def analyze_driver_requirement(*args, **kwargs):
+    return _impl().analyze_driver_requirement(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(allow_guest=True)
+def find_suitable_drivers(*args, **kwargs):
+    return _impl().find_suitable_drivers(*args, **_sanitize_framework_kwargs(kwargs))

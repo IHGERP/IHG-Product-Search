@@ -10,8 +10,6 @@
 #   search_products(query, in_stock_only)      -> hybrid semantic search
 #   get_product(item_code)                      -> one product's full record
 #   find_alternatives(item_code, mode)          -> equivalents / cross-sell
-#   check_driver_requirement(item_code)         -> is an external driver needed?
-#   find_driver(item_code)                      -> suitable LED drivers for a fixture
 # Provider: OpenAI (tool calling) with Groq fallback for plain (toolless) turns.
 
 import json
@@ -41,7 +39,6 @@ DOMAIN KNOWLEDGE (use to advise, clearly separated from catalog facts):
 - CCT: 2700-3000K warm (hospitality, residential), 4000K neutral (office/retail), 5000-6500K cool/daylight (industrial, task).
 - IP: IP20 indoor/dry, IP44 splash, IP65 outdoor/wet, IP67/68 submersible. Outdoor/garden/facade => IP65+.
 - Driver sizing: driver wattage must exceed total LED load (~20% headroom); match constant-voltage (strips, e.g. 12V/24V) vs constant-current (mA, many fixtures); match dimming protocol (TRIAC/0-10V/DALI).
-- DRIVER QUESTIONS: for "is a driver required for X", "find/suggest a driver for X", or "what driver fits X", ALWAYS call check_driver_requirement / find_driver with the item_code — never judge it yourself. If the tool says driver_required is "unknown", tell the rep the spec is missing and to verify the datasheet; do not invent a driver. Fixtures with an integrated driver (name says "with driver" or code ends .DR) need none.
 - Beam: narrow (10-24°) accent/spot, medium (36°) general, wide (60°+) wash/flood.
 - Lumens vs watts: prefer lm for brightness; modern LED ~ 100-130 lm/W.
 
@@ -90,30 +87,6 @@ TOOLS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "check_driver_requirement",
-            "description": "Determine whether a fixture needs an EXTERNAL LED driver. Returns driver_required (true/false/unknown), the parsed electrical load (mA / voltage), and the reason. Use for 'is a driver required for <code>?'.",
-            "parameters": {
-                "type": "object",
-                "properties": {"item_code": {"type": "string"}},
-                "required": ["item_code"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_driver",
-            "description": "Find LED drivers compatible with a fixture's electrical load (matches output current mA / voltage / power headroom). Use for 'find/suggest a suitable driver for <code>'. Returns no drivers if the fixture has an integrated driver or its load spec is unknown.",
-            "parameters": {
-                "type": "object",
-                "properties": {"item_code": {"type": "string"}},
-                "required": ["item_code"],
-            },
-        },
-    },
 ]
 
 
@@ -152,20 +125,6 @@ def _run_tool(name, args):
             return {"mode": r.get("mode"),
                     "results": [{"reason": x.get("reason"), **_slim(x.get("document", {}))}
                                 for x in (r.get("results") or [])[:6]]}
-
-        if name == "check_driver_requirement":
-            from igh_search.igh_search.product_search_v2 import analyze_driver_requirement
-            r = analyze_driver_requirement(cstr(args.get("item_code")), feature_flag_override=1)
-            return {"driver_required": r.get("driver_required"), "reason": r.get("reason"),
-                    "load": r.get("load")}
-
-        if name == "find_driver":
-            from igh_search.igh_search.product_search_v2 import find_suitable_drivers
-            r = find_suitable_drivers(cstr(args.get("item_code")), limit=6, feature_flag_override=1)
-            return {"driver_required": r.get("driver_required"), "reason": r.get("reason"),
-                    "load": r.get("load"),
-                    "drivers": [{"match_reason": d.get("match_reason"), **_slim(d.get("document", {}))}
-                                for d in (r.get("drivers") or [])[:6]]}
         return {"error": f"unknown tool {name}"}
     except Exception as exc:
         return {"error": cstr(exc)[:200]}
@@ -235,7 +194,7 @@ def product_assistant_chat(message=None, history=None, feature_flag_override=0):
                 args = {}
             result = _run_tool(name, args)
             tool_trace.append({"tool": name, "args": args})
-            for key in ("products", "results", "drivers"):
+            for key in ("products", "results"):
                 for p in result.get(key, []) or []:
                     if p.get("item_code"):
                         grounded_products.append(p)

@@ -2418,3 +2418,15 @@ def scan_data_quality(*args, **kwargs):
 def product_assistant_chat(*args, **kwargs):
     from igh_search.igh_search.product_assistant import product_assistant_chat as _f
     return _f(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(allow_guest=True)
+def analyze_driver_requirement(*args, **kwargs):
+    from igh_search.igh_search.product_search_v2 import analyze_driver_requirement as _f
+    return _f(*args, **_sanitize_framework_kwargs(kwargs))
+
+
+@frappe.whitelist(allow_guest=True)
+def find_suitable_drivers(*args, **kwargs):
+    from igh_search.igh_search.product_search_v2 import find_suitable_drivers as _f
+    return _f(*args, **_sanitize_framework_kwargs(kwargs))
