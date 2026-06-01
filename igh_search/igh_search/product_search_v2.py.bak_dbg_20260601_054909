@@ -791,8 +791,9 @@ def search_products_v2(
             json.dumps(_cache_payload, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
         cache_key = "igh_search:search:v1:" + _digest
-        _cached = frappe.cache().get_value(cache_key)
-        if _cached and isinstance(_cached, dict) and _cached.get("hits") is not None:
+        from igh_search.igh_search.product_stock_freshness import _cache_get_json
+        _cached = _cache_get_json(cache_key, None)
+        if _cached:
             _qd = _cached.get("query_debug") or {}
             _qd["served_from_cache"] = True
             _cached["query_debug"] = _qd
@@ -937,7 +938,8 @@ def search_products_v2(
     }
     if cache_key:
         try:
-            frappe.cache().set_value(cache_key, response, expires_in_sec=60)
+            from igh_search.igh_search.product_stock_freshness import _cache_set_json
+            _cache_set_json(cache_key, response, expires_in_sec=60)
         except Exception:
             pass
     return response

@@ -1,5 +1,4 @@
 import copy
-import hashlib
 import json
 import time
 from datetime import datetime
@@ -765,41 +764,6 @@ def search_products_v2(
     ensure_query_access(feature_flag_override=feature_flag_override)
 
     started_at = time.perf_counter()
-
-    # Short-TTL response cache. Absorbs prod variance (Typesense / gunicorn
-    # / Frappe-Cloud noise) for repeat queries: the initial '*' load,
-    # common filter presets, and pagination back-and-forth. Stock freshness
-    # is bounded by the TTL; reconcile runs normally on a cache miss.
-    cache_key = None
-    try:
-        _cache_filters = (
-            filters
-            if isinstance(filters, str)
-            else json.dumps(filters or {}, sort_keys=True, default=str)
-        )
-        _cache_payload = {
-            "query": cstr(query or ""),
-            "filters": _cache_filters,
-            "sort_by": cstr(sort_by or ""),
-            "page": cint(page),
-            "page_length": cint(per_page or page_length),
-            "include_inactive": cint(include_inactive),
-            "item_code_hint": cstr(item_code_hint or ""),
-            "strict_sort": cint(strict_sort),
-        }
-        _digest = hashlib.md5(
-            json.dumps(_cache_payload, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-        cache_key = "igh_search:search:v1:" + _digest
-        _cached = frappe.cache().get_value(cache_key)
-        if _cached and isinstance(_cached, dict) and _cached.get("hits") is not None:
-            _qd = _cached.get("query_debug") or {}
-            _qd["served_from_cache"] = True
-            _cached["query_debug"] = _qd
-            return _cached
-    except Exception:
-        cache_key = None
-
     client = create_typesense_client()
     parsed_filters = parse_search_filters(filters)
     query_resolution = resolve_effective_query(query=query, item_code_hint=item_code_hint)
@@ -935,11 +899,6 @@ def search_products_v2(
             "reconciled_count": cint(stock_reconcile.get("reconciled_count") or 0),
         },
     }
-    if cache_key:
-        try:
-            frappe.cache().set_value(cache_key, response, expires_in_sec=60)
-        except Exception:
-            pass
     return response
 def suggest_products_v2(query=None, limit=10, feature_flag_override=0):
     response = search_products_v2(

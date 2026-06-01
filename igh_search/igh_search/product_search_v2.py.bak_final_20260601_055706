@@ -791,13 +791,15 @@ def search_products_v2(
             json.dumps(_cache_payload, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
         cache_key = "igh_search:search:v1:" + _digest
-        _cached = frappe.cache().get_value(cache_key)
-        if _cached and isinstance(_cached, dict) and _cached.get("hits") is not None:
+        from igh_search.igh_search.product_stock_freshness import _cache_get_json
+        _cached = _cache_get_json(cache_key, None)
+        if _cached:
             _qd = _cached.get("query_debug") or {}
             _qd["served_from_cache"] = True
             _cached["query_debug"] = _qd
             return _cached
     except Exception:
+        frappe.log_error(frappe.get_traceback(), "IGH search cache CHECK failed")
         cache_key = None
 
     client = create_typesense_client()
@@ -935,11 +937,23 @@ def search_products_v2(
             "reconciled_count": cint(stock_reconcile.get("reconciled_count") or 0),
         },
     }
+    try:
+        open("/tmp/ihg_cache_dbg.log", "a").write(f"reached_set ck={cache_key!r}\n")
+    except Exception:
+        pass
     if cache_key:
         try:
-            frappe.cache().set_value(cache_key, response, expires_in_sec=60)
-        except Exception:
-            pass
+            from igh_search.igh_search.product_stock_freshness import _cache_set_json
+            _cache_set_json(cache_key, response, expires_in_sec=60)
+            try:
+                open("/tmp/ihg_cache_dbg.log", "a").write(f"SET OK ck={cache_key!r}\n")
+            except Exception:
+                pass
+        except Exception as _e:
+            try:
+                open("/tmp/ihg_cache_dbg.log", "a").write(f"SET FAIL {type(_e).__name__}: {_e!r}\n")
+            except Exception:
+                pass
     return response
 def suggest_products_v2(query=None, limit=10, feature_flag_override=0):
     response = search_products_v2(
