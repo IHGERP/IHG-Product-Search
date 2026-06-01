@@ -83,7 +83,7 @@ class TypesenseSettings(Document):
     pass
 
 
-BASE_PRICE_LIST = "MRP"
+BASE_PRICE_LIST = "RRP"
 PROMO_PRICE_LIST = "Promo"
 ITEM_EXTRA_FIELD_MAP = {
     "series": "series",
