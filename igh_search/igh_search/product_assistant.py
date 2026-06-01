@@ -45,7 +45,11 @@ DOMAIN KNOWLEDGE (use to advise, clearly separated from catalog facts):
 - Beam: narrow (10-24°) accent/spot, medium (36°) general, wide (60°+) wash/flood.
 - Lumens vs watts: prefer lm for brightness; modern LED ~ 100-130 lm/W.
 
-STYLE: concise, practical, sales-oriented. When you recommend products, list a few with item_code, key specs, price and stock. Offer the obvious next step (alternatives, cross-sell, a quote)."""
+ACTIONS:
+- The rep can add products to a cart (which becomes a quotation). When they say "add X", "put 10 of Y in the cart", or "quote these", call add_to_cart with the exact item_code(s) and quantities. If quantity isn't stated, default to 1. Briefly confirm what you added.
+- ENQUIRY PASTE: if the rep pastes a multi-line customer enquiry (several products/specs at once), treat each line as a separate need — search per line, then summarise which line matched which item_code and offer to add them all to a quote.
+
+STYLE: concise, practical, sales-oriented. The UI renders the matched products as visual CARDS below your message (with item_code, name, price, stock), so DO NOT repeat a long numbered list of those same details — it is redundant. Instead give a 1-2 sentence summary (e.g. "Here are 3 compatible 220mA drivers in stock — the Lumitronix is the closest match.") and call out only the single best pick or any caveat. Keep formatting light. Stock and price come live from the catalog at query time — state that when relevant. End with a brief next step (add to quote, alternatives)."""
 
 TOOLS = [
     {
@@ -114,6 +118,31 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_to_cart",
+            "description": "Add one or more products to the rep's cart (the basis for a quotation). Use when the rep says 'add X', 'put 10 of Y in the cart', 'quote these'. Confirm the exact item_code(s) first if ambiguous.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "description": "Products to add.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "item_code": {"type": "string"},
+                                "qty": {"type": "number", "description": "Quantity (default 1)."},
+                            },
+                            "required": ["item_code"],
+                        },
+                    }
+                },
+                "required": ["items"],
+            },
+        },
+    },
 ]
 
 
@@ -166,6 +195,27 @@ def _run_tool(name, args):
                     "load": r.get("load"),
                     "drivers": [{"match_reason": d.get("match_reason"), **_slim(d.get("document", {}))}
                                 for d in (r.get("drivers") or [])[:6]]}
+
+        if name == "add_to_cart":
+            from igh_search.igh_search.api import insert_cart_items
+            requested = args.get("items") or []
+            added, failed = [], []
+            last = None
+            for entry in requested:
+                code = cstr(entry.get("item_code")).strip()
+                qty = entry.get("qty") or 1
+                if not code:
+                    continue
+                res = insert_cart_items(item_code=code, qty=qty)
+                if (res or {}).get("status") == "success":
+                    added.append({"item_code": code, "qty": qty})
+                    last = res
+                else:
+                    failed.append({"item_code": code, "error": (res or {}).get("message", "failed")})
+            return {"added": added, "failed": failed,
+                    "cart_total": (last or {}).get("grand_total"),
+                    "message": f"Added {len(added)} item(s) to the cart." if added else "Nothing added."}
+
         return {"error": f"unknown tool {name}"}
     except Exception as exc:
         return {"error": cstr(exc)[:200]}
@@ -214,6 +264,7 @@ def product_assistant_chat(message=None, history=None, feature_flag_override=0):
 
     grounded_products = []
     tool_trace = []
+    cart_added = []  # items the assistant added to the cart this turn (for a UI toast)
     for _round in range(MAX_TOOL_ROUNDS):
         reply = _openai_chat(messages, with_tools=True)
         tool_calls = reply.get("tool_calls") or []
@@ -222,6 +273,7 @@ def product_assistant_chat(message=None, history=None, feature_flag_override=0):
                 "reply": cstr(reply.get("content")).strip(),
                 "products": grounded_products[:12],
                 "tool_trace": tool_trace,
+                "cart_added": cart_added,
             }
         # assistant turn that requested tools
         messages.append({"role": "assistant", "content": reply.get("content") or "",
@@ -241,10 +293,13 @@ def product_assistant_chat(message=None, history=None, feature_flag_override=0):
                         grounded_products.append(p)
             if isinstance(result, dict) and result.get("product"):
                 grounded_products.append(result["product"])
+            if name == "add_to_cart" and result.get("added"):
+                cart_added.extend(result["added"])
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": json.dumps(result, ensure_ascii=True)})
 
     # Tool-round budget exhausted: ask for a final answer without more tools.
     final = _openai_chat(messages, with_tools=False)
     return {"reply": cstr(final.get("content")).strip(),
-            "products": grounded_products[:12], "tool_trace": tool_trace}
+            "products": grounded_products[:12], "tool_trace": tool_trace,
+            "cart_added": cart_added}
