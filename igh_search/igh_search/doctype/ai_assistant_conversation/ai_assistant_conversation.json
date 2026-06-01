@@ -1,0 +1,161 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "field:conversation_id",
+ "creation": "2026-06-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "summary_section",
+  "conversation_id",
+  "title",
+  "assistant_user",
+  "status",
+  "message_count",
+  "first_query",
+  "started_on",
+  "last_activity",
+  "route",
+  "feedback_section",
+  "satisfaction",
+  "found_required_data",
+  "feedback_comment",
+  "data_section",
+  "user_queries",
+  "product_codes",
+  "messages_json"
+ ],
+ "fields": [
+  {
+   "fieldname": "summary_section",
+   "fieldtype": "Section Break",
+   "label": "Summary"
+  },
+  {
+   "fieldname": "conversation_id",
+   "fieldtype": "Data",
+   "label": "Conversation ID",
+   "reqd": 1,
+   "unique": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "title",
+   "fieldtype": "Data",
+   "label": "Title",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "assistant_user",
+   "fieldtype": "Data",
+   "label": "User",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Active\nClosed",
+   "default": "Active"
+  },
+  {
+   "fieldname": "message_count",
+   "fieldtype": "Int",
+   "label": "Message Count",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "first_query",
+   "fieldtype": "Small Text",
+   "label": "First Query"
+  },
+  {
+   "fieldname": "started_on",
+   "fieldtype": "Datetime",
+   "label": "Started On"
+  },
+  {
+   "fieldname": "last_activity",
+   "fieldtype": "Datetime",
+   "label": "Last Activity",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "route",
+   "fieldtype": "Data",
+   "label": "Launched From"
+  },
+  {
+   "fieldname": "feedback_section",
+   "fieldtype": "Section Break",
+   "label": "Feedback"
+  },
+  {
+   "fieldname": "satisfaction",
+   "fieldtype": "Select",
+   "label": "Satisfaction",
+   "options": "\nSatisfied\nPartially\nNot Satisfied",
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "found_required_data",
+   "fieldtype": "Select",
+   "label": "Found Required Data",
+   "options": "\nYes\nPartially\nNo",
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "feedback_comment",
+   "fieldtype": "Small Text",
+   "label": "Feedback Comment"
+  },
+  {
+   "fieldname": "data_section",
+   "fieldtype": "Section Break",
+   "label": "Conversation Data"
+  },
+  {
+   "fieldname": "user_queries",
+   "fieldtype": "Long Text",
+   "label": "User Queries"
+  },
+  {
+   "fieldname": "product_codes",
+   "fieldtype": "Long Text",
+   "label": "Surfaced Product Codes"
+  },
+  {
+   "fieldname": "messages_json",
+   "fieldtype": "Long Text",
+   "label": "Messages JSON"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-06-01 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "IGH Search",
+ "name": "AI Assistant Conversation",
+ "naming_rule": "By fieldname",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "last_activity",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
