@@ -14,6 +14,7 @@
 #   find_driver(item_code)                      -> suitable LED drivers for a fixture
 # Provider: OpenAI (tool calling) with Groq fallback for plain (toolless) turns.
 
+import copy
 import json
 
 import frappe
@@ -27,8 +28,9 @@ from igh_search.igh_search.ai_product_search import (
 MAX_TOOL_ROUNDS = 4
 DEFAULT_RESULT_FIELDS = (
     "item_code", "item_name", "brand", "category_list", "power", "color_temp",
-    "ip_rate", "rate", "stock", "in_stock",
+    "ip_rate", "beam_angle", "lumen_output", "rate", "stock", "in_stock",
 )
+SEARCH_CANDIDATES = 10  # pool fetched per search; top 8 are returned to the model
 
 SYSTEM_PROMPT = """You are the IHG Product Assistant — a senior lighting and electrical sales engineer for an internal sales team in the UAE. You help reps find products, compare options, size drivers/accessories, and answer technical lighting/electrical questions.
 
@@ -36,6 +38,7 @@ GROUNDING RULES (critical):
 - For anything about IHG's actual products, stock, price, or specs, you MUST call a tool. NEVER invent an item code, price, stock figure, or spec.
 - Quote item_code and item_name exactly as returned by tools. If a tool returns nothing, say so plainly and suggest how to refine — do not fabricate.
 - Prices are in AED. Treat stock figures as point-in-time.
+- SEARCHING: keep the search query short and spec-focused (e.g. "15W 3000K IP65 spotlight"), not a full sentence. Do NOT set in_stock_only unless the rep explicitly asks for in-stock / available items — otherwise good matches that are temporarily out of stock are needlessly hidden. If the rep asks for the cheapest/lowest price, just search normally; the catalog already ranks sensibly.
 
 DOMAIN KNOWLEDGE (use to advise, clearly separated from catalog facts):
 - CCT: 2700-3000K warm (hospitality, residential), 4000K neutral (office/retail), 5000-6500K cool/daylight (industrial, task).
@@ -61,7 +64,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Natural language need or spec string, e.g. '15W 3000K IP65 outdoor spotlight' or 'warm light for a hotel lobby'."},
-                    "in_stock_only": {"type": "boolean", "description": "Limit to in-stock items."},
+                    "in_stock_only": {"type": "boolean", "description": "Set true ONLY if the rep explicitly asks for in-stock / available / ready-to-ship items. Default false — leave unset for normal searches so good out-of-stock matches still show (down-ranked)."},
                 },
                 "required": ["query"],
             },
@@ -150,21 +153,50 @@ def _slim(doc):
     return {k: doc.get(k) for k in DEFAULT_RESULT_FIELDS if doc.get(k) not in (None, "")}
 
 
+def _lean_search(query, in_stock_only=False):
+    """Fast catalog search for the chat. The assistant LLM has already turned the
+    user's words into a clean spec query, so we DON'T re-run the intent LLM
+    (mode='deterministic') and we DON'T run the heavy 3-stage relaxation loop that
+    ai_search_products_v2 uses. Just: deterministic intent -> one hybrid search;
+    if it's empty, ONE relaxed retry that demotes the hard spec filters to soft
+    boosts (recall). Hybrid (semantic) is on, so conceptual queries work too."""
+    from igh_search.igh_search.ai_product_search import (
+        resolve_ai_search_intent, execute_intent_search,
+    )
+    from igh_search.igh_search.product_search_v2 import search_products_v2
+
+    intent = resolve_ai_search_intent(message=query, mode="deterministic")
+    r = execute_intent_search(intent, page_length=SEARCH_CANDIDATES, feature_flag_override=1)
+    # Tier 2: demote the hard spec filters to soft boosts (recall on over-constrained specs).
+    if cint(r.get("found")) == 0:
+        try:
+            relaxed = copy.deepcopy(intent)
+            relaxed.setdefault("hard_constraints", {})["filters"] = []
+            r = execute_intent_search(relaxed, page_length=SEARCH_CANDIDATES, feature_flag_override=1)
+        except Exception:
+            pass
+    # Tier 3: pure semantic — query only, NO filters. Bypasses a bogus category/spec
+    # lock from the crude deterministic parser (e.g. "light" -> category "LIGHT") and
+    # lets the hybrid vector index answer conceptual queries ("warm light for a lobby").
+    if cint(r.get("found")) == 0:
+        try:
+            r = search_products_v2(query=query, filters={}, page_length=SEARCH_CANDIDATES,
+                                   feature_flag_override=1, use_hybrid=1)
+        except Exception:
+            pass
+    hits = [_slim(h.get("document", {})) for h in (r.get("hits") or [])]
+    if in_stock_only:
+        in_stock = [h for h in hits if h.get("in_stock")]
+        hits = in_stock or hits  # prefer in-stock, but never hide all matches (down-rank, don't exclude)
+    return {"found": cint(r.get("found")), "products": hits[:8]}
+
+
 def _run_tool(name, args):
     """Execute a tool call against the existing search/product code. Returns a
     compact JSON-able result (token-budget friendly)."""
     try:
         if name == "search_products":
-            from igh_search.igh_search.ai_product_search import ai_search_products_v2
-            r = ai_search_products_v2(
-                message=cstr(args.get("query")),
-                page_length=6,
-                feature_flag_override=1,
-            )
-            hits = [_slim(h.get("document", {})) for h in (r.get("hits") or [])[:6]]
-            if cint(args.get("in_stock_only")):
-                hits = [h for h in hits if h.get("in_stock")]
-            return {"found": r.get("found"), "products": hits}
+            return _lean_search(cstr(args.get("query")), cint(args.get("in_stock_only")))
 
         if name == "get_product":
             from igh_search.igh_search.product_search_v2 import get_product_document
