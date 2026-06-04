@@ -17,6 +17,87 @@ from collections import defaultdict
 import frappe
 from frappe.utils import cint, cstr, flt
 
+# ── Phase 1 facet-vocabulary validators ──────────────────────────────────────
+# Closed-vocab rules per spec field. A facet VALUE is "junk" when it can't be a
+# real value for that field (material/category/noise leaked into the field). "NA"
+# is unknown, not a constraint -> normalise to empty. Conservative on purpose:
+# anything not clearly junk is left alone (human-review queue, not auto-null).
+
+_NA_TOKENS = {"NA", "N/A", "NONE", "-", "--", "NIL"}
+# beam: degrees, or a small set of genuine non-numeric beam descriptors.
+_VALID_BEAM_WORDS = {"DIFFUSED", "RADIAL", "ASYMMETRIC", "ADJUSTABLE", "SYMMETRIC", "OVAL", "ELLIPTICAL", "FLOOD", "SPOT", "WIDE", "NARROW"}
+# color_temp: kelvin, or genuine colour names for coloured fixtures.
+_VALID_CCT_WORDS = {"RGB", "RGBW", "RGBCW", "RGBWW", "RGB+WARM WHITE", "RGBDMX", "RED", "GREEN", "BLUE", "AMBER", "YELLOW", "PINK", "ORANGE", "PURPLE", "WARM WHITE", "COOL WHITE", "NEUTRAL WHITE", "DAYLIGHT", "TUNABLE", "TUNABLE WHITE", "CCT TUNABLE", "WHITE"}
+
+
+def _is_junk_facet(field, value):
+    v = cstr(value).strip()
+    if not v:
+        return False
+    up = v.upper()
+    if up in _NA_TOKENS:
+        return "na"  # normalise to empty
+    if field == "beam_angle":
+        if re.match(r"^\d+(?:\.\d+)?\s*°?$", v):
+            return False
+        return False if up in _VALID_BEAM_WORDS else "junk"
+    if field == "ip_rate":
+        return False if re.match(r"^IP\s?\d{2}$", up) else "junk"
+    if field in ("power",):
+        return False if re.search(r"\d", v) else "junk"
+    if field in ("color_temp_", "color_temp"):
+        if re.search(r"\d{3,5}\s*K", up) or up in _VALID_CCT_WORDS:
+            return False
+        return "junk"
+    return False
+
+
+@frappe.whitelist()
+def audit_facet_quality(fields=None):
+    """READ-ONLY. Enumerate Typesense facet values per spec field and classify each
+    as valid / na / junk, with the count of active docs affected. Gives exact
+    numbers before any cleanup write."""
+    if frappe.session.user == "Guest":
+        frappe.throw("Authentication required")
+    from igh_search.igh_search.product_search_v2 import (
+        create_typesense_client, get_default_collection,
+    )
+    target = [f.strip() for f in cstr(fields).split(",") if f.strip()] or [
+        "beam_angle", "ip_rate", "power", "color_temp",
+    ]
+    client = create_typesense_client()
+    coll = get_default_collection()
+    report = {}
+    for field in target:
+        try:
+            resp = client.collections[coll].documents.search({
+                "q": "*", "query_by": "item_name", "filter_by": "is_active:=1",
+                "facet_by": field, "max_facet_values": 200, "per_page": 0,
+            })
+            counts = resp.get("facet_counts", [])
+            vals = counts[0].get("counts", []) if counts else []
+        except Exception as exc:
+            report[field] = {"error": cstr(exc)[:160]}
+            continue
+        junk, na, valid = [], [], 0
+        junk_docs = na_docs = 0
+        for entry in vals:
+            value, n = entry.get("value"), cint(entry.get("count"))
+            verdict = _is_junk_facet(field, value)
+            if verdict == "junk":
+                junk.append({"value": value, "docs": n}); junk_docs += n
+            elif verdict == "na":
+                na.append({"value": value, "docs": n}); na_docs += n
+            else:
+                valid += 1
+        report[field] = {
+            "distinct_values": len(vals), "valid_values": valid,
+            "junk_values": sorted(junk, key=lambda x: -x["docs"]),
+            "junk_docs": junk_docs, "na_docs": na_docs,
+        }
+    return report
+
+
 _HTML_RE = re.compile(r"<[^>]+>")
 
 # name-pattern -> the category_list values that are consistent with it

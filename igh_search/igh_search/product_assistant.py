@@ -153,6 +153,96 @@ def _slim(doc):
     return {k: doc.get(k) for k in DEFAULT_RESULT_FIELDS if doc.get(k) not in (None, "")}
 
 
+# Real category vocabulary (from the live facet audit) — the extractor may only
+# pick a category from this set, so a generic word like "light" never becomes a
+# bogus category lock the way the deterministic parser did.
+_EXTRACT_CATEGORIES = [
+    "SPOT LIGHT", "DOWN LIGHT", "CEILING RECESSED LIGHT", "PANEL LIGHT", "TRACK LIGHT",
+    "LINEAR LIGHT", "WALL LIGHT", "WALL WASHER", "FLOOD LIGHT", "GARDEN LIGHT",
+    "BOLLARD LIGHT", "INGROUND LIGHT", "STRIP LIGHT", "NEON FLEX", "PENDANT LIGHT",
+    "CHANDELIERS", "CEILING LIGHT", "SUSPENDED LAMP", "TABLE LAMP", "FLOOR LAMP",
+    "LED DRIVERS", "ALUMINUM PROFILES", "BULBS & LAMPS", "MAGNETIC LIGHT", "STREET LIGHT",
+    "UNDERWATER LIGHT", "PROJECTOR LIGHT", "BRICK LIGHT", "SWITCHES AND SOCKETS",
+    "LIGHTING ACCESSORIES", "STREET LIGHT", "TASK LIGHT", "INDUSTRIAL LIGHT",
+]
+
+
+def _extract_query_constraints(query):
+    """Cheap, cached LLM spec-extractor. One small call (cheap model) → structured
+    constraints. Cached 24h by normalized query. Returns None on any failure so the
+    caller falls back to the deterministic parser. This is the fast two-tier 'deep'
+    understanding without the heavy resolve_ai_search_intent(mode='fast') pipeline."""
+    q = cstr(query).strip()
+    if not q:
+        return None
+    cache = frappe.cache()
+    ck = "ai_assist_extract|" + q.lower()[:180]
+    cached = cache.get_value(ck)
+    if cached is not None:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
+    key = get_openai_api_key()
+    if not key:
+        return None
+    system = (
+        "Extract structured lighting/electrical search constraints from a sales query. "
+        "Return ONLY JSON with keys: category (one of " + json.dumps(_EXTRACT_CATEGORIES) +
+        " or null), color_temp (e.g. \"3000K\"; warm=3000K, neutral=4000K, cool/daylight=6000K, or null), "
+        "ip_rate (e.g. \"IP65\"; outdoor/wet/garden/facade => IP65, or null), power (e.g. \"15W\" or null), "
+        "clean_query (the core product noun phrase for semantic search). "
+        "Rules: pick a category ONLY if the specific product type is clear — never map a generic word "
+        "like 'light' to a category. Only include values clearly implied by the query."
+    )
+    try:
+        r = requests.post(
+            OPENAI_API_URL,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={"model": get_openai_model(), "temperature": 0, "max_tokens": 160,
+                  "response_format": {"type": "json_object"},
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": q}]},
+            timeout=15,
+        )
+        r.raise_for_status()
+        out = json.loads(r.json()["choices"][0]["message"]["content"])
+        if not isinstance(out, dict):
+            return None
+        cache.set_value(ck, json.dumps(out), expires_in_sec=86400)
+        return out
+    except Exception:
+        return None
+
+
+def _intent_from_extractor(query):
+    """Build a deterministic-shaped intent, then correct it with the cheap extractor:
+    category comes ONLY from the real vocabulary (kills the bogus 'LIGHT' lock);
+    specs are added as SOFT boosts (rank, don't exclude) to preserve recall."""
+    ex = _extract_query_constraints(query)
+    if not isinstance(ex, dict):
+        return None
+    from igh_search.igh_search.ai_product_search import resolve_ai_search_intent
+    base = resolve_ai_search_intent(message=query, mode="deterministic")
+    filters = base.get("filters") or {}
+    cat = cstr(ex.get("category") or "").strip().upper()
+    filters["category_list"] = [cat] if cat in {c.upper() for c in _EXTRACT_CATEGORIES} else []
+    hard = ["category_list"] if filters["category_list"] else []
+    for fld, key in (("color_temp", "color_temp"), ("ip_rate", "ip_rate"), ("power", "power")):
+        val = cstr(ex.get(key) or "").strip()
+        if val:
+            filters[fld] = [val]
+            hard.append(fld)  # user EXPLICITLY stated it -> hard filter (precision)
+    base["filters"] = filters
+    # explicit category + specs are hard (precision); tier-2 fallback in _lean_search
+    # clears these to recover recall when an over-constrained query returns 0.
+    base.setdefault("hard_constraints", {})["filters"] = hard
+    cq = cstr(ex.get("clean_query") or "").strip()
+    if cq:
+        base["query"] = cq
+    return base
+
+
 def _lean_search(query, in_stock_only=False):
     """Fast catalog search for the chat. The assistant LLM has already turned the
     user's words into a clean spec query, so we DON'T re-run the intent LLM
@@ -165,7 +255,11 @@ def _lean_search(query, in_stock_only=False):
     )
     from igh_search.igh_search.product_search_v2 import search_products_v2
 
-    intent = resolve_ai_search_intent(message=query, mode="deterministic")
+    # Lightweight cached LLM spec-extractor (cheap model, tiny prompt) replaces the
+    # crude deterministic parser (which invented a bogus "LIGHT" category) WITHOUT
+    # the heavy resolve_ai_search_intent(mode="fast") pipeline (~5s). Falls back to
+    # deterministic if extraction is unavailable. See _extract_query_constraints.
+    intent = _intent_from_extractor(query) or resolve_ai_search_intent(message=query, mode="deterministic")
     r = execute_intent_search(intent, page_length=SEARCH_CANDIDATES, feature_flag_override=1)
     # Tier 2: demote the hard spec filters to soft boosts (recall on over-constrained specs).
     if cint(r.get("found")) == 0:
