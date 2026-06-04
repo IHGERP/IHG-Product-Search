@@ -1,253 +1,43 @@
 {
+  "_comment": "Golden set for the AI search/intelligence layer. Original 16 parse-level cases + traffic-seeded result-accuracy cases. expected_filters drives BOTH the parse check (_benchmark_filters_match on applied_filters) and the result check (_doc_satisfies on returned docs, in ai_eval.py). Grow this from AI Product Search Event zero-result/top queries + AI Assistant Conversation gap list (Phase 4).",
   "cases": [
-    {
-      "name": "cat_cct_power",
-      "message": "3000k spotlights below 10w",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "SPOT LIGHT"
-        ],
-        "color_temp": [
-          "3000K"
-        ],
-        "power_value_range": {
-          "max": 10
-        }
-      }
-    },
-    {
-      "name": "cat_power_price",
-      "message": "10w spotlights below 50aed",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "SPOT LIGHT"
-        ],
-        "power": [
-          "10W"
-        ],
-        "rate_range": {
-          "max": 50
-        }
-      }
-    },
-    {
-      "name": "waterproof_downlight",
-      "message": "waterproof downlights",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "DOWN LIGHT"
-        ],
-        "ip_rating_numeric_range": {
-          "min": 65
-        }
-      }
-    },
-    {
-      "name": "outdoor_flood_price",
-      "message": "outdoor flood lights under 200",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "FLOOD LIGHT"
-        ],
-        "rate_range": {
-          "max": 200
-        },
-        "ip_rating_numeric_range": {
-          "min": 65
-        }
-      }
-    },
-    {
-      "name": "warm_white_panel",
-      "message": "warm white panel light",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "PANEL LIGHT"
-        ],
-        "color_temp": [
-          "3000K"
-        ]
-      }
-    },
-    {
-      "name": "ip_cct_downlight",
-      "message": "ip65 3000k downlight",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "DOWN LIGHT"
-        ],
-        "ip_rate": [
-          "IP65"
-        ],
-        "color_temp": [
-          "3000K"
-        ]
-      }
-    },
-    {
-      "name": "driver_voltage",
-      "message": "led driver 24v",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "LED DRIVERS"
-        ],
-        "input_voltage": [
-          "24V"
-        ]
-      }
-    },
-    {
-      "name": "panel_price_between",
-      "message": "panel lights between 50 and 100 aed",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "PANEL LIGHT"
-        ],
-        "rate_range": {
-          "min": 50,
-          "max": 100
-        }
-      }
-    },
-    {
-      "name": "spot_instock",
-      "message": "spotlights in stock",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "SPOT LIGHT"
-        ],
-        "in_stock": true
-      }
-    },
-    {
-      "name": "power_spot",
-      "message": "5w spotlight",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "SPOT LIGHT"
-        ],
-        "power": [
-          "5W"
-        ]
-      }
-    },
-    {
-      "name": "plain_category",
-      "message": "downlights",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "DOWN LIGHT"
-        ]
-      }
-    },
-    {
-      "name": "sort_cheapest",
-      "message": "cheapest downlights",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_sort_by": "rate:asc",
-      "expected_filters": {
-        "category_list": [
-          "DOWN LIGHT"
-        ]
-      }
-    },
-    {
-      "name": "sort_highstock",
-      "message": "spotlights high stock",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "stock_priority",
-      "expected_sort_by": "stock:desc",
-      "expected_filters": {
-        "category_list": [
-          "SPOT LIGHT"
-        ]
-      }
-    },
-    {
-      "name": "typo_downlight",
-      "message": "donwlights",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "DOWN LIGHT"
-        ]
-      }
-    },
-    {
-      "name": "typo_spotlight",
-      "message": "spotligt 3000k",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "spec_match",
-      "expected_filters": {
-        "category_list": [
-          "SPOT LIGHT"
-        ],
-        "color_temp": [
-          "3000K"
-        ]
-      }
-    },
-    {
-      "name": "sku_lookup_exact",
-      "message": "DL-100",
-      "page_context": {
-        "route": "/list"
-      },
-      "expected_intent_class": "sku_lookup"
-    }
+    { "name": "cat_cct_power", "message": "3000k spotlights below 10w", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"], "color_temp": ["3000K"], "power_value_range": {"max": 10}} },
+    { "name": "cat_power_price", "message": "10w spotlights below 50aed", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"], "power": ["10W"], "rate_range": {"max": 50}} },
+    { "name": "waterproof_downlight", "message": "waterproof downlights", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["DOWN LIGHT"], "ip_rating_numeric_range": {"min": 65}} },
+    { "name": "outdoor_flood_price", "message": "outdoor flood lights under 200", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["FLOOD LIGHT"], "rate_range": {"max": 200}, "ip_rating_numeric_range": {"min": 65}} },
+    { "name": "warm_white_panel", "message": "warm white panel light", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["PANEL LIGHT"], "color_temp": ["3000K"]} },
+    { "name": "ip_cct_downlight", "message": "ip65 3000k downlight", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["DOWN LIGHT"], "ip_rate": ["IP65"], "color_temp": ["3000K"]} },
+    { "name": "driver_voltage", "message": "led driver 24v", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["LED DRIVERS"], "input_voltage": ["24V"]} },
+    { "name": "panel_price_between", "message": "panel lights between 50 and 100 aed", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["PANEL LIGHT"], "rate_range": {"min": 50, "max": 100}} },
+    { "name": "spot_instock", "message": "spotlights in stock", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"], "in_stock": true} },
+    { "name": "power_spot", "message": "5w spotlight", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"], "power": ["5W"]} },
+    { "name": "plain_category", "message": "downlights", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["DOWN LIGHT"]} },
+    { "name": "sort_cheapest", "message": "cheapest downlights", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_sort_by": "rate:asc", "expected_filters": {"category_list": ["DOWN LIGHT"]} },
+    { "name": "sort_highstock", "message": "spotlights high stock", "page_context": {"route": "/list"}, "expected_intent_class": "stock_priority", "expected_sort_by": "stock:desc", "expected_filters": {"category_list": ["SPOT LIGHT"]} },
+    { "name": "typo_downlight", "message": "donwlights", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["DOWN LIGHT"]} },
+    { "name": "typo_spotlight", "message": "spotligt 3000k", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"], "color_temp": ["3000K"]} },
+    { "name": "sku_lookup_exact", "message": "DL-100", "page_context": {"route": "/list"}, "expected_intent_class": "sku_lookup" },
+
+    { "name": "real_10w_3000k_ip65_downlight", "message": "10w 3000k ip65 downlight", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["DOWN LIGHT"], "color_temp": ["3000K"], "ip_rate": ["IP65"], "power": ["10W"]} },
+    { "name": "real_downlight_3000k_12w_ip65", "message": "down light 3000k 12w ip65", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["DOWN LIGHT"], "color_temp": ["3000K"], "ip_rate": ["IP65"], "power": ["12W"]} },
+    { "name": "real_dimmable_driver_24v_instock", "message": "dimmable led driver 24v in stock", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["LED DRIVERS"], "input_voltage": ["24V"], "in_stock": true} },
+    { "name": "real_i_want_spotlights", "message": "i want spotlights", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"]} },
+    { "name": "concept_warm_lobby", "message": "warm light for a hotel lobby", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"color_temp": ["3000K", "2700K"]} },
+    { "name": "concept_office_downlight_4000k", "message": "recessed downlight for an office 4000k", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["DOWN LIGHT", "CEILING RECESSED LIGHT"], "color_temp": ["4000K"]} },
+    { "name": "spec_spot_15w_3000k_ip65", "message": "15w 3000k ip65 outdoor spotlight", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"], "color_temp": ["3000K"], "ip_rate": ["IP65"], "power": ["15W"]} },
+    { "name": "spec_cob_spot_7w_4000k", "message": "cob spotlight 7w 4000k", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"], "color_temp": ["4000K"], "power": ["7W"]} },
+    { "name": "spec_daylight_downlight_5000k", "message": "5000k daylight downlight", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["DOWN LIGHT"], "color_temp": ["5000K"]} },
+    { "name": "spec_strip_24v_3000k", "message": "strip light 24v 3000k", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["STRIP LIGHT"], "color_temp": ["3000K"], "input_voltage": ["24V"]} },
+    { "name": "spec_flood_100w", "message": "high lumen flood light 100w", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["FLOOD LIGHT"], "power": ["100W"]} },
+    { "name": "spec_track_4000k_retail", "message": "4000k track light for retail", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["TRACK LIGHT"], "color_temp": ["4000K"]} },
+    { "name": "cat_bollard", "message": "garden bollard light", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["BOLLARD LIGHT"]} },
+    { "name": "cat_pendant_dining", "message": "pendant light for dining table", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["PENDANT LIGHT", "SUSPENDED LAMP"]} },
+    { "name": "cat_profile", "message": "aluminium profile for led strip", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["ALUMINIUM PROFILE", "PROFILE"]} },
+    { "name": "ip67_inground", "message": "ip67 inground light", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"ip_rating_numeric_range": {"min": 67}} },
+    { "name": "spec_12w_spot_instock", "message": "12w spotlight in stock", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["SPOT LIGHT"], "power": ["12W"], "in_stock": true} },
+    { "name": "real_lca_current", "message": "lca 900-1750ma", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["LED DRIVERS"]} },
+    { "name": "spec_panel_cool_4000k", "message": "cool white office panel 4000k", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["PANEL LIGHT"], "color_temp": ["4000K"]} },
+    { "name": "spec_wall_washer_24v", "message": "outdoor wall washer 24v", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {"category_list": ["WALL WASHER"]} },
+    { "name": "concept_bathroom_mirror", "message": "light for a bathroom mirror", "page_context": {"route": "/list"}, "expected_intent_class": "spec_match", "expected_filters": {} }
   ]
 }

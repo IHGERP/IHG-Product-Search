@@ -1,0 +1,92 @@
+{
+  "_comment": "Chatbot-level eval. Each case runs through product_assistant_chat; the grounded products it returns are scored against expected_filters via the same constraint check the search scorecard uses. reply_must_contain is an optional substring assertion on the natural-language reply (e.g. driver verdicts). expected_item_codes is optional for precision.",
+  "cases": [
+    {
+      "name": "spec_spot_15w_3000k_ip65",
+      "message": "15W 3000K IP65 outdoor spotlight",
+      "expected_filters": {
+        "category_list": ["SPOT LIGHT"],
+        "color_temp": ["3000K"],
+        "ip_rate": ["IP65"],
+        "power_value_range": {"min": 13, "max": 17}
+      }
+    },
+    {
+      "name": "concept_warm_lobby",
+      "message": "warm light for a hotel lobby",
+      "expected_filters": {
+        "color_temp": ["3000K", "2700K"]
+      }
+    },
+    {
+      "name": "concept_office_downlight_4000k",
+      "message": "recessed downlight for an office, 4000K",
+      "expected_filters": {
+        "category_list": ["DOWN LIGHT", "CEILING RECESSED LIGHT"],
+        "color_temp": ["4000K"]
+      }
+    },
+    {
+      "name": "enquiry_driver_lca",
+      "message": "LED Driver LCA 60W 900-1750mA",
+      "expected_filters": {
+        "category_list": ["LED DRIVERS"]
+      }
+    },
+    {
+      "name": "cheapest_3000k_ip65_spot",
+      "message": "cheapest 3000K IP65 spotlight in stock",
+      "expected_filters": {
+        "category_list": ["SPOT LIGHT"],
+        "color_temp": ["3000K"],
+        "ip_rate": ["IP65"]
+      }
+    },
+    {
+      "name": "waterproof_downlight",
+      "message": "waterproof downlights",
+      "expected_filters": {
+        "category_list": ["DOWN LIGHT"],
+        "ip_rating_numeric_range": {"min": 65}
+      }
+    },
+    {
+      "name": "facade_outdoor",
+      "message": "outdoor facade wall washer 24v",
+      "expected_filters": {
+        "category_list": ["WALL WASHER"]
+      }
+    },
+    {
+      "name": "driver_required_known_fixture",
+      "message": "is a driver required for LB2111.W.830.WWH.36?",
+      "reply_must_contain": "driver"
+    },
+    {
+      "name": "find_driver_for_fixture",
+      "message": "find a suitable driver for LB2100.W.830.WBK.36",
+      "reply_must_contain": "driver"
+    },
+    {
+      "name": "panel_warm",
+      "message": "warm white panel light",
+      "expected_filters": {
+        "category_list": ["PANEL LIGHT"],
+        "color_temp": ["3000K"]
+      }
+    },
+    {
+      "name": "track_light_4000k",
+      "message": "4000k track light for retail",
+      "expected_filters": {
+        "category_list": ["TRACK LIGHT"],
+        "color_temp": ["4000K"]
+      }
+    },
+    {
+      "name": "enquiry_paste_two_line",
+      "message": "Lumibright Spot light 15 Watts 3000K IP20\nLED Driver 60W 900-1750mA",
+      "expected_filters": {}
+    }
+  ]
+}
