@@ -16,6 +16,7 @@
 
 import copy
 import json
+import re
 
 import frappe
 import requests
@@ -39,6 +40,7 @@ GROUNDING RULES (critical):
 - Quote item_code and item_name exactly as returned by tools. If a tool returns nothing, say so plainly and suggest how to refine — do not fabricate.
 - Prices are in AED. Treat stock figures as point-in-time.
 - SEARCHING: keep the search query short and spec-focused (e.g. "15W 3000K IP65 spotlight"), not a full sentence. Do NOT set in_stock_only unless the rep explicitly asks for in-stock / available items — otherwise good matches that are temporarily out of stock are needlessly hidden. If the rep asks for the cheapest/lowest price, just search normally; the catalog already ranks sensibly.
+- VERIFICATION & HONESTY: a search result may include `relaxed: true` (no exact match — the specs were loosened to find anything) and each product may carry `_misses` (the requested specs it does NOT meet, e.g. ["IP65"]). NEVER present a product that misses a requested spec as if it matches. If results are relaxed or carry `_misses`, say so plainly: lead with true exact matches, then clearly label the rest as "closest alternatives" and name the gap ("…but IP20, not IP65"). If nothing matches a hard requirement, tell the rep honestly and suggest the nearest option or how to adjust — do not pretend.
 
 DOMAIN KNOWLEDGE (use to advise, clearly separated from catalog facts):
 - CCT: 2700-3000K warm (hospitality, residential), 4000K neutral (office/retail), 5000-6500K cool/daylight (industrial, task).
@@ -215,11 +217,42 @@ def _extract_query_constraints(query):
         return None
 
 
-def _intent_from_extractor(query):
+def _spec_num(value):
+    m = re.search(r"\d+(?:\.\d+)?", cstr(value))
+    return float(m.group()) if m else None
+
+
+def _annotate_matches(products, ex):
+    """Phase 3 verification: tag each product with `_misses` — the requested specs
+    it does NOT actually meet — so the assistant can be honest instead of presenting
+    a near-miss as a match. CCT/power = exact-ish; IP = numeric (>= is fine)."""
+    if not isinstance(ex, dict):
+        return products
+    want_cct = cstr(ex.get("color_temp")).strip().upper()
+    want_ip = _spec_num(ex.get("ip_rate"))
+    want_pw = _spec_num(ex.get("power"))
+    for p in products:
+        misses = []
+        pc = cstr(p.get("color_temp")).strip().upper()
+        if want_cct and pc and pc != want_cct:
+            misses.append(ex.get("color_temp"))
+        if want_ip is not None:
+            pip = _spec_num(p.get("ip_rate"))
+            if pip is not None and pip < want_ip:
+                misses.append(ex.get("ip_rate"))
+        if want_pw is not None:
+            ppw = _spec_num(p.get("power"))
+            if ppw is not None and abs(ppw - want_pw) > max(1.0, want_pw * 0.15):
+                misses.append(ex.get("power"))
+        if misses:
+            p["_misses"] = misses
+    return products
+
+
+def _intent_from_extractor(query, ex):
     """Build a deterministic-shaped intent, then correct it with the cheap extractor:
     category comes ONLY from the real vocabulary (kills the bogus 'LIGHT' lock);
-    specs are added as SOFT boosts (rank, don't exclude) to preserve recall."""
-    ex = _extract_query_constraints(query)
+    explicit specs become HARD filters (precision), tier-2 fallback recovers recall."""
     if not isinstance(ex, dict):
         return None
     from igh_search.igh_search.ai_product_search import resolve_ai_search_intent
@@ -259,14 +292,17 @@ def _lean_search(query, in_stock_only=False):
     # crude deterministic parser (which invented a bogus "LIGHT" category) WITHOUT
     # the heavy resolve_ai_search_intent(mode="fast") pipeline (~5s). Falls back to
     # deterministic if extraction is unavailable. See _extract_query_constraints.
-    intent = _intent_from_extractor(query) or resolve_ai_search_intent(message=query, mode="deterministic")
+    ex = _extract_query_constraints(query)
+    intent = _intent_from_extractor(query, ex) or resolve_ai_search_intent(message=query, mode="deterministic")
+    relaxed = False
     r = execute_intent_search(intent, page_length=SEARCH_CANDIDATES, feature_flag_override=1)
     # Tier 2: demote the hard spec filters to soft boosts (recall on over-constrained specs).
     if cint(r.get("found")) == 0:
         try:
-            relaxed = copy.deepcopy(intent)
-            relaxed.setdefault("hard_constraints", {})["filters"] = []
-            r = execute_intent_search(relaxed, page_length=SEARCH_CANDIDATES, feature_flag_override=1)
+            relaxed_intent = copy.deepcopy(intent)
+            relaxed_intent.setdefault("hard_constraints", {})["filters"] = []
+            r = execute_intent_search(relaxed_intent, page_length=SEARCH_CANDIDATES, feature_flag_override=1)
+            relaxed = cint(r.get("found")) > 0
         except Exception:
             pass
     # Tier 3: pure semantic — query only, NO filters. Bypasses a bogus category/spec
@@ -276,13 +312,19 @@ def _lean_search(query, in_stock_only=False):
         try:
             r = search_products_v2(query=query, filters={}, page_length=SEARCH_CANDIDATES,
                                    feature_flag_override=1, use_hybrid=1)
+            relaxed = cint(r.get("found")) > 0
         except Exception:
             pass
     hits = [_slim(h.get("document", {})) for h in (r.get("hits") or [])]
     if in_stock_only:
         in_stock = [h for h in hits if h.get("in_stock")]
         hits = in_stock or hits  # prefer in-stock, but never hide all matches (down-rank, don't exclude)
-    return {"found": cint(r.get("found")), "products": hits[:8]}
+    hits = hits[:8]
+    _annotate_matches(hits, ex)  # Phase 3: tag specs each result misses (honesty)
+    constraints = {k: ex.get(k) for k in ("category", "color_temp", "ip_rate", "power")
+                   if isinstance(ex, dict) and ex.get(k)} if isinstance(ex, dict) else {}
+    return {"found": cint(r.get("found")), "products": hits, "relaxed": relaxed,
+            "constraints": constraints}
 
 
 def _run_tool(name, args):
