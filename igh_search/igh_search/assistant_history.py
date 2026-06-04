@@ -148,6 +148,31 @@ def delete_assistant_conversation(conversation_id=None):
 	return {"status": "success"}
 
 
+def _route_thumb_to_reranker(msgs, idx, rating):
+	"""A 👍/👎 on an assistant reply -> feed the products in that reply (keyed by the
+	preceding user query) into the feedback-reranker pipeline so good answers rank
+	higher next time. Best-effort; never breaks feedback saving."""
+	try:
+		if rating not in ("up", "down"):
+			return
+		msg = msgs[idx] if 0 <= idx < len(msgs) else {}
+		codes = [p.get("item_code") for p in (msg.get("products") or [])
+		         if isinstance(p, dict) and p.get("item_code")]
+		if not codes:
+			return
+		query = ""
+		for j in range(idx - 1, -1, -1):
+			if isinstance(msgs[j], dict) and msgs[j].get("role") == "user":
+				query = cstr(msgs[j].get("content"))
+				break
+		if not query:
+			return
+		from igh_search.igh_search.ai_learning import record_assistant_feedback_signal
+		record_assistant_feedback_signal(query, codes, rating)
+	except Exception:
+		pass
+
+
 def submit_assistant_feedback(conversation_id=None, satisfaction=None, found_required_data=None, comment=None, message_ratings=None):
 	user = _user()
 	if not user or not conversation_id:
@@ -179,6 +204,7 @@ def submit_assistant_feedback(conversation_id=None, satisfaction=None, found_req
 					i = int(idx_str)
 					if 0 <= i < len(msgs) and isinstance(msgs[i], dict):
 						msgs[i]["rating"] = rating
+						_route_thumb_to_reranker(msgs, i, rating)  # close the ranking loop
 				doc.messages_json = json.dumps(msgs)[:MAX_JSON_CHARS]
 			except Exception:
 				pass
