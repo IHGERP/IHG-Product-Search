@@ -82,110 +82,44 @@ def find_similar_products(item_code=None, limit=8):
         return {"item_code": item_code, "results": [], "error": cstr(exc)[:160]}
 
 
-def _fetch_docs_by_codes(client, coll, codes):
-    """Slim docs for specific item_codes, keyed by code (for the featured list)."""
-    codes = [cstr(c).strip() for c in codes if cstr(c).strip()][:50]
-    if not codes:
-        return {}
-    quoted = ",".join("`%s`" % c.replace("`", "") for c in codes)
-    try:
-        r = client.collections[coll].documents.search({
-            "q": "*", "query_by": "item_name",
-            "filter_by": "item_code:=[%s]" % quoted,
-            "per_page": len(codes), "exclude_fields": "embedding",
-        })
-        out = {}
-        for h in r.get("hits", []):
-            d = h.get("document", {})
-            if d.get("item_code"):
-                out[cstr(d.get("item_code")).strip()] = d
-        return out
-    except Exception:
-        return {}
-
-
 def _promotion_picks(limit=8):
-    """Push-to-sell picks = items carrying a PROMO / OFFER price (dead stock the
-    business has already marked to clear), ranked by tied-up VALUE = price x stock so
-    the biggest dead-stock liabilities surface first. This deliberately keys off the
-    promo price (not raw stock count) so raw materials / accessories like end caps and
-    mounting clips — which hold huge stock but never carry a promo price — never show.
-    Manager-picked Featured Products are woven in ahead of them when present."""
+    """Push-to-sell picks. Approximates overstock/aging (high stock, low lifetime
+    sales = slow-mover) among sellable items; manual featured (Featured Product) is
+    woven in first when present. Margin/new-arrival signals plug in here later."""
     from igh_search.igh_search.product_search_v2 import (
         create_typesense_client, get_default_collection,
     )
-    limit = max(min(cint(limit) or 8, 20), 1)
     picks, seen = [], set()
-    try:
-        client = create_typesense_client(); coll = get_default_collection()
-    except Exception:
-        return []
-
-    # 1) manager-picked featured first (fetch + actually show them)
+    # 1) manager-picked featured (if the doctype exists)
     try:
         if frappe.db.exists("DocType", "Featured Product"):
-            feat = frappe.get_all("Featured Product", filters={"enabled": 1},
-                                  fields=["item_code"], limit_page_length=limit)
-            codes = [cstr(f.get("item_code")).strip() for f in feat if f.get("item_code")]
-            docs = _fetch_docs_by_codes(client, coll, codes)
-            for code in codes:
-                d = docs.get(code)
-                if d and code not in seen:
+            featured = frappe.get_all("Featured Product", filters={"enabled": 1},
+                                      fields=["item_code"], limit_page_length=cint(limit))
+            for f in featured:
+                code = cstr(f.get("item_code")).strip()
+                if code and code not in seen:
                     seen.add(code)
-                    s = _slim(d); s["why"] = "featured"
-                    picks.append(s)
     except Exception:
         pass
-
-    # 2) promo-priced dead stock, ranked by value = price x stock.
-    # Pull a wide candidate set of items that have a promo price, then re-rank in
-    # Python by tied-up value (Typesense can't sort on a computed price*stock).
-    candidates = []
-    # Prefer a tight promo filter; if offer_rate isn't a filterable numeric field on
-    # the index, fall back to a broad active+stock pull (the Python promo-guard below
-    # still keeps only genuine promo-priced items).
-    for filt in ("is_active:=1 && offer_rate:>0 && stock:>0", "is_active:=1 && stock:>0"):
-        try:
-            r = client.collections[coll].documents.search({
-                "q": "*", "query_by": "item_name",
-                "filter_by": filt,
-                "sort_by": "stock:desc",  # coarse pre-rank; re-ranked by value below
-                "per_page": 250, "exclude_fields": "embedding",
-            })
-            candidates = [h.get("document", {}) for h in r.get("hits", [])]
-        except Exception:
-            candidates = []
-        if candidates:
-            break
-
-    ranked = []
-    for d in candidates:
-        base = flt(d.get("rate"))
-        offer = flt(d.get("offer_rate"))
-        stock = flt(d.get("stock"))
-        price = base if base > 0 else offer
-        if price <= 0 or stock <= 0:
-            continue
-        # genuine promo only: offer below list price (or no list price to compare)
-        if base > 0 and not (0 < offer < base):
-            continue
-        d["_value"] = price * stock
-        d["_disc"] = int(round((base - offer) / base * 100)) if (base > 0 and offer > 0) else 0
-        ranked.append(d)
-    ranked.sort(key=lambda x: x.get("_value", 0), reverse=True)
-
-    for d in ranked:
-        code = cstr(d.get("item_code")).strip()
-        if not code or code in seen:
-            continue
-        seen.add(code)
-        s = _slim(d)
-        s["why"] = ("%d%% off · clearance" % d["_disc"]) if d.get("_disc") else "promo · clearance"
-        picks.append(s)
-        if len(picks) >= limit:
-            break
-
-    return picks[:limit]
+    # 2) overstock / slow-mover proxy from the index
+    try:
+        client = create_typesense_client(); coll = get_default_collection()
+        r = client.collections[coll].documents.search({
+            "q": "*", "query_by": "item_name",
+            "filter_by": "is_active:=1 && rate:>0 && stock:>20",
+            "sort_by": "stock:desc", "per_page": max(min(cint(limit) or 8, 20), 1),
+            "exclude_fields": "embedding",
+        })
+        for h in r.get("hits", []):
+            d = _slim(h.get("document", {}))
+            code = d.get("item_code")
+            if code and code not in seen:
+                seen.add(code)
+                d["why"] = "overstock - move it"
+                picks.append(d)
+    except Exception:
+        pass
+    return picks[:cint(limit) or 8]
 
 
 @frappe.whitelist()
