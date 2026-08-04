@@ -127,6 +127,42 @@ FACET_FIELDS = [
     "product_star_rating",
     "customer_count",
 ]
+
+# Faceting is by far the most expensive part of a Typesense query here: on the
+# ~180k-doc collection a browse query costs ~21ms of server compute with no
+# facets and ~205ms with all of FACET_FIELDS. Only the fields the filter panel
+# actually renders (frontend V2_FILTER_KEYS) are worth that cost.
+#
+# Dropped vs FACET_FIELDS, and why:
+#   is_active     - always hard-filtered to 1, so the facet has exactly 1 value
+#   is_variant    - not a filter in the UI
+#   in_stock,
+#   stock_bucket,
+#   price_bucket,
+#   lumen_unit    - not rendered as filter facets
+#   product_star_rating,
+#   customer_count - exposed as *_range filters, which don't use facet counts
+SEARCH_FACET_FIELDS = [
+    "brand",
+    "item_group",
+    "category_list",
+    "series",
+    "product_type",
+    "power",
+    "color_temp",
+    "ip_rate",
+    "beam_angle",
+    "mounting",
+    "body_finish",
+    "input_voltage",
+    "output_voltage",
+    "output_current",
+    "lamp_type",
+    "material",
+    "warranty",
+    "variant_of",
+    "is_manufactured_item",
+]
 SEARCH_RESULT_FIELDS = (
     "item_code",
     "item_name",
@@ -303,18 +339,57 @@ def get_product_v2_schema():
     return copy.deepcopy(PRODUCT_V2_SCHEMA)
 
 
+def resolve_typesense_connection():
+    """Connection details for server-side Typesense calls.
+
+    `Typesense Settings` holds the public hostname, which is also what the
+    browser uses. That hostname is proxied through Cloudflare here, and the
+    edge->origin hop dominates every call: measured ~205ms wall for a query
+    Typesense itself reports finishing in ~25ms (search_time_ms), against a
+    1.4ms ping to the edge. The backend has no reason to go out to the public
+    internet and back, so let site_config point it straight at the origin:
+
+        "igh_search_typesense_host":     "10.x.x.x"   # or internal DNS
+        "igh_search_typesense_port":     8108
+        "igh_search_typesense_protocol": "http"
+
+    Only the host needs overriding; port and protocol fall back to the doc.
+    The result is memoised per request so several searches in one request don't
+    each re-read the settings doc and re-decrypt the API key.
+    """
+    cached = getattr(frappe.local, "_igh_typesense_conn", None)
+    if cached:
+        return cached
+
+    settings = frappe.get_doc("Typesense Settings")
+    conf = frappe.conf or {}
+
+    host = cstr(conf.get("igh_search_typesense_host") or "").strip() or settings.host
+    port = conf.get("igh_search_typesense_port") or settings.port
+    protocol = cstr(conf.get("igh_search_typesense_protocol") or "").strip() or settings.protocol
+
+    connection = {
+        "host": host,
+        "port": port,
+        "protocol": protocol if protocol in ("http", "https") else "https",
+        "api_key": settings.get_password("api_key"),
+    }
+    frappe.local._igh_typesense_conn = connection
+    return connection
+
+
 def create_typesense_client():
-    client_details = frappe.get_doc("Typesense Settings")
+    connection = resolve_typesense_connection()
     return typesense.Client(
         {
             "nodes": [
                 {
-                    "host": client_details.host,
-                    "port": client_details.port,
-                    "protocol": client_details.protocol if client_details.protocol in ("http", "https") else "https",
+                    "host": connection["host"],
+                    "port": connection["port"],
+                    "protocol": connection["protocol"],
                 }
             ],
-            "api_key": client_details.get_password("api_key"),
+            "api_key": connection["api_key"],
             "connection_timeout_seconds": 120,
         }
     )
@@ -343,6 +418,20 @@ def get_v2_config():
         or "product_v2_hybrid",
         "hybrid_alpha": flt(conf.get("igh_search_hybrid_alpha", 0.7)),
     }
+
+
+# Seconds a search response stays in Redis. This is the ceiling on how stale the
+# stock numbers on a cached result page can be — the runtime stock reconcile only
+# runs on a miss — so it trades freshness for latency. Tune with
+# `igh_search_response_cache_ttl` in site_config; 0 disables the cache entirely.
+DEFAULT_RESPONSE_CACHE_TTL = 180
+
+
+def get_response_cache_ttl():
+    raw = (frappe.conf or {}).get("igh_search_response_cache_ttl")
+    if raw in (None, ""):
+        return DEFAULT_RESPONSE_CACHE_TTL
+    return max(cint(raw), 0)
 
 
 def is_dual_write_enabled():
@@ -628,7 +717,7 @@ def delete_typesense_documents(client, collection_name, item_codes):
     item_codes = [code for code in item_codes if code]
     if not item_codes:
         return
-    filters = ",".join(f'"{code}"' for code in item_codes)
+    filters = ",".join(_backtick_quote(code) for code in item_codes)
     try:
         client.collections[collection_name].documents.delete(
             {"filter_by": f"item_code:=[{filters}]"}
@@ -749,6 +838,17 @@ def build_soft_boost_clause(soft_boosts):
     return f"_eval([{body}]):desc"
 
 
+def _wants_facets(page, include_facets=None):
+    """Whether this search should ask Typesense for facet counts.
+
+    Default: only on the first page (counts are identical across pages of the
+    same query+filter set). Pass include_facets=1/0 to force it on or off.
+    """
+    if include_facets not in (None, ""):
+        return bool(cint(include_facets))
+    return max(cint(page), 1) == 1
+
+
 def search_products_v2(
     query=None,
     filters=None,
@@ -762,6 +862,7 @@ def search_products_v2(
     strict_sort=0,
     soft_boosts=None,
     use_hybrid=None,
+    include_facets=None,
 ):
     ensure_query_access(feature_flag_override=feature_flag_override)
 
@@ -771,35 +872,48 @@ def search_products_v2(
     # / Frappe-Cloud noise) for repeat queries: the initial '*' load,
     # common filter presets, and pagination back-and-forth. Stock freshness
     # is bounded by the TTL; reconcile runs normally on a cache miss.
+    cache_ttl = get_response_cache_ttl()
     cache_key = None
     try:
-        _cache_filters = (
-            filters
-            if isinstance(filters, str)
-            else json.dumps(filters or {}, sort_keys=True, default=str)
-        )
-        _cache_payload = {
-            "query": cstr(query or ""),
-            "filters": _cache_filters,
-            "sort_by": cstr(sort_by or ""),
-            "page": cint(page),
-            "page_length": cint(per_page or page_length),
-            "include_inactive": cint(include_inactive),
-            "item_code_hint": cstr(item_code_hint or ""),
-            "strict_sort": cint(strict_sort),
-        }
-        _digest = hashlib.md5(
-            json.dumps(_cache_payload, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()
-        cache_key = "igh_search:search:v1:" + _digest
-        _cached = frappe.cache().get_value(cache_key)
+        if cache_ttl:
+            _cache_filters = (
+                filters
+                if isinstance(filters, str)
+                else json.dumps(filters or {}, sort_keys=True, default=str)
+            )
+            _cache_payload = {
+                "query": cstr(query or ""),
+                "filters": _cache_filters,
+                "sort_by": cstr(sort_by or ""),
+                "page": cint(page),
+                "page_length": cint(per_page or page_length),
+                "include_inactive": cint(include_inactive),
+                "item_code_hint": cstr(item_code_hint or ""),
+                "strict_sort": cint(strict_sort),
+                "facets": _wants_facets(page, include_facets),
+            }
+            _digest = hashlib.md5(
+                json.dumps(_cache_payload, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            cache_key = "igh_search:search:v1:" + _digest
+    except Exception:
+        cache_key = None
+
+    if cache_key:
+        # expires=True keeps frappe.local.cache out of the picture. Without it a
+        # miss writes None into the per-request local dict, and the later
+        # set_value(expires_in_sec=...) deliberately skips that dict — so every
+        # further identical search in the same request re-read the cached None
+        # and went back to Typesense.
+        try:
+            _cached = frappe.cache().get_value(cache_key, expires=True)
+        except Exception:
+            _cached = None
         if _cached and isinstance(_cached, dict) and _cached.get("hits") is not None:
             _qd = _cached.get("query_debug") or {}
             _qd["served_from_cache"] = True
             _cached["query_debug"] = _qd
             return _cached
-    except Exception:
-        cache_key = None
 
     client = create_typesense_client()
     parsed_filters = parse_search_filters(filters)
@@ -818,13 +932,19 @@ def search_products_v2(
         "q": query_text,
         "query_by": "item_code_normalized,item_code,item_name_normalized,item_name,searchable_text,brand,category_list,series,parent_item_code,parent_item_name",
         "query_by_weights": "12,10,8,6,4,2,2,2,2,2",
-        "facet_by": ",".join(FACET_FIELDS),
         "filter_by": build_filter_by(filters=parsed_filters, include_inactive=include_inactive),
         "page": max(cint(page), 1),
         "per_page": max(min(cint(page_length), 100), 1),
         "sort_by": sort_resolution["final_sort"],
         "include_fields": ",".join(SEARCH_RESULT_FIELDS),
     }
+
+    # Facet counts depend only on the query + filter set, never on which page of
+    # results you asked for — so computing them again on page 2+ buys nothing and
+    # costs ~180ms of Typesense compute. Callers paging through a result set keep
+    # showing the counts from page 1. `include_facets` forces the issue either way.
+    if _wants_facets(page, include_facets):
+        search_parameters["facet_by"] = ",".join(SEARCH_FACET_FIELDS)
 
     # Soft spec/sellability boosts: prepend an _eval(...) scoring clause so that
     # items matching the user's spec preferences (and sellable items with a price
@@ -939,7 +1059,7 @@ def search_products_v2(
     }
     if cache_key:
         try:
-            frappe.cache().set_value(cache_key, response, expires_in_sec=60)
+            frappe.cache().set_value(cache_key, response, expires_in_sec=cache_ttl)
         except Exception:
             pass
     return response
@@ -971,23 +1091,16 @@ def get_similar_products_v2(item_code, limit=10, include_manual=1, feature_flag_
 
     results = []
     seen = {item_code}
+    client = create_typesense_client()
+
+    manual_codes = []
     if cint(include_manual):
         manual_codes = (
             source_document.get("manual_alternative_codes", [])
             + source_document.get("manual_related_codes", [])
         )
-        manual_hits = get_documents_by_codes(manual_codes, include_inactive=0)
-        for hit in manual_hits:
-            code = hit.get("item_code")
-            if code in seen:
-                continue
-            seen.add(code)
-            results.append({"reason": "manual", "score": 100, "document": hit})
-            if len(results) >= cint(limit):
-                return {"item_code": item_code, "results": results}
 
-    client = create_typesense_client()
-    filter_clauses = [f'item_code:!={item_code}', "is_active:=1"]
+    filter_clauses = [f"item_code:!={_backtick_quote(item_code)}", "is_active:=1"]
     if source_document.get("category_list"):
         filter_clauses.append(
             f'category_list:="{_escape_filter_value(source_document.get("category_list"))}"'
@@ -996,16 +1109,35 @@ def get_similar_products_v2(item_code, limit=10, include_manual=1, feature_flag_
         filter_clauses.append(
             f'product_type:="{_escape_filter_value(source_document.get("product_type"))}"'
         )
-    candidate_response = client.collections[get_default_collection()].documents.search(
-        {
-            "q": "*",
-            "query_by": "searchable_text",
-            "filter_by": " && ".join(filter_clauses),
-            "per_page": max(cint(limit) * 5, 20),
-            "page": 1,
-            "sort_by": "in_stock:desc,business_score:desc,stock:desc",
-        }
+
+    # Curated codes and computed candidates in a single round trip. Both are
+    # known up front — neither depends on the other's result — so there is no
+    # reason to pay the ~180ms wire cost twice.
+    manual_search = build_codes_search(manual_codes, include_inactive=0)
+    candidate_search = {
+        "collection": get_default_collection(),
+        "q": "*",
+        "query_by": "searchable_text",
+        "filter_by": " && ".join(filter_clauses),
+        "per_page": max(cint(limit) * 5, 20),
+        "page": 1,
+        "sort_by": "in_stock:desc,business_score:desc,stock:desc",
+    }
+    batch_results = typesense_multi_search(
+        client, [s for s in (manual_search, candidate_search) if s]
     )
+
+    if manual_search:
+        for hit in _documents_from_result(batch_results[0] if batch_results else {}):
+            code = hit.get("item_code")
+            if code in seen:
+                continue
+            seen.add(code)
+            results.append({"reason": "manual", "score": 100, "document": hit})
+            if len(results) >= cint(limit):
+                return {"item_code": item_code, "results": results}
+
+    candidate_response = batch_results[-1] if batch_results else {}
     for hit in candidate_response.get("hits", []):
         document = hit.get("document", {})
         code = document.get("item_code")
@@ -1038,6 +1170,66 @@ CROSS_SELL_COMPANION_CATEGORIES = {
 }
 
 
+_SEED_TAG_RE = re.compile(r"<[^>]+>")
+_SEED_LABEL_RE = re.compile(
+    r"\b(?:brand|category list|category|promotion|product type|item code|series)\s*:",
+    re.IGNORECASE,
+)
+_SEED_NON_WORD_RE = re.compile(r"[^\w.&/-]+")
+# A seed query is a "find me things like this one" probe. Keep it to the few
+# tokens that actually distinguish the product.
+SEED_QUERY_MAX_TOKENS = 12
+
+
+def build_seed_query(document, include_category=True):
+    """Build a compact similarity probe from a product's structured fields.
+
+    The indexed `searchable_text` is the wrong thing to hand back to Typesense as
+    a query: it is a ~430-char blob of HTML fragments (`<br>`, `&amp;`), field
+    labels, the item_code repeated, and alias expansions that duplicate every
+    token. Handing 400 chars of that back as `q` gives Typesense ~60 query
+    tokens to resolve, and combined with this call's restrictive filter_by and
+    `_eval` sort on the hybrid collection that measured **4763ms of server
+    compute**, against 155ms for the compact seed below — a 31x difference, and
+    the single largest cost on the product detail page.
+
+    Pulling the same signal out of the structured fields instead gives a short,
+    deduplicated, HTML-free probe with the distinguishing terms up front.
+    """
+    parts = [
+        cstr(document.get("item_name")),
+        cstr(document.get("brand")),
+        cstr(document.get("product_type")),
+        cstr(document.get("spec_summary")),
+    ]
+    if include_category:
+        parts.insert(1, cstr(document.get("category_list")))
+
+    tokens = []
+    seen = set()
+    for part in parts:
+        if not part:
+            continue
+        cleaned = _SEED_TAG_RE.sub(" ", part)
+        cleaned = _SEED_LABEL_RE.sub(" ", cleaned)
+        for token in _SEED_NON_WORD_RE.split(cleaned):
+            token = token.strip(".-/&")
+            if not token:
+                continue
+            key = token.lower()
+            # Drop pure noise: single chars and the HTML entity leftovers.
+            if len(key) < 2 or key in ("amp", "nbsp", "br"):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            tokens.append(token)
+            if len(tokens) >= SEED_QUERY_MAX_TOKENS:
+                return " ".join(tokens)
+
+    return " ".join(tokens) or cstr(document.get("item_name")) or "*"
+
+
 def get_product_alternatives_v2(item_code, mode="alternatives", limit=8, in_stock_only=1, feature_flag_override=0):
     """Sales-facing alternatives & cross-sell.
 
@@ -1059,19 +1251,16 @@ def get_product_alternatives_v2(item_code, mode="alternatives", limit=8, in_stoc
     results = []
     seen = {item_code}
 
-    # Manual relationships always lead (curated by the product team).
+    # Manual relationships always lead (curated by the product team). The lookup
+    # is issued below in the same multi_search as the candidate query rather than
+    # on its own, so the two cost one round trip instead of two.
     manual_codes = (
         source.get("manual_alternative_codes", []) if mode == "alternatives"
         else source.get("manual_related_codes", [])
     )
-    for hit in get_documents_by_codes(manual_codes, include_inactive=0):
-        code = hit.get("item_code")
-        if code and code not in seen:
-            seen.add(code)
-            results.append({"reason": "manual", "score": 100, "document": hit})
 
     # Build the candidate filter by mode.
-    filter_clauses = [f'item_code:!={item_code}', "is_active:=1"]
+    filter_clauses = [f"item_code:!={_backtick_quote(item_code)}", "is_active:=1"]
     if cint(in_stock_only) and mode == "alternatives":
         filter_clauses.append("in_stock:=1")
 
@@ -1088,9 +1277,11 @@ def get_product_alternatives_v2(item_code, mode="alternatives", limit=8, in_stoc
         elif source_category:
             filter_clauses.append(f'category_list:!="{_escape_filter_value(source_category)}"')
 
-    # Semantic candidates: use the source's own descriptive text as the query so
-    # hybrid surfaces meaning-similar items; fall back to keyword when hybrid off.
-    seed_text = cstr(source.get("searchable_text") or source.get("item_name") or "*")[:400]
+    # Semantic candidates: use a compact description of the source item as the
+    # query so hybrid surfaces meaning-similar items; keyword when hybrid is off.
+    # `alternatives` already pins category via filter_by, so leave it out of the
+    # query text there and spend the tokens on the distinguishing specs instead.
+    seed_text = build_seed_query(source, include_category=(mode != "alternatives"))
     search_params = {
         "q": seed_text,
         "query_by": "searchable_text,item_name,category_list",
@@ -1111,14 +1302,30 @@ def get_product_alternatives_v2(item_code, mode="alternatives", limit=8, in_stoc
         search_params["query_by_weights"] = "2,3,2,1"
         search_params["exclude_fields"] = "embedding"
 
+    # One request carrying both the curated-codes lookup and the candidate
+    # search. They target different collections when hybrid is on, which
+    # multi_search handles via the per-search `collection` key.
+    manual_search = build_codes_search(manual_codes, include_inactive=0)
+    batch = [s for s in (manual_search, dict(search_params, collection=target_collection)) if s]
+
     try:
-        response = client.collections[target_collection].documents.search(search_params)
+        batch_results = typesense_multi_search(client, batch)
     except Exception:
         # Hybrid hiccup -> fall back to keyword on the main collection.
         search_params.pop("query_by_weights", None)
         search_params.pop("exclude_fields", None)
         search_params["query_by"] = "searchable_text,item_name,category_list"
-        response = client.collections[get_default_collection()].documents.search(search_params)
+        batch = [s for s in (manual_search, dict(search_params, collection=get_default_collection())) if s]
+        batch_results = typesense_multi_search(client, batch)
+
+    if manual_search:
+        for hit in _documents_from_result(batch_results[0] if batch_results else {}):
+            code = hit.get("item_code")
+            if code and code not in seen:
+                seen.add(code)
+                results.append({"reason": "manual", "score": 100, "document": hit})
+
+    response = batch_results[-1] if batch_results else {}
 
     for hit in response.get("hits", []):
         document = hit.get("document", {})
@@ -1339,12 +1546,59 @@ def find_suitable_drivers(item_code, limit=8, feature_flag_override=0):
             "load": load, "drivers": scored[:limit]}
 
 
+def typesense_multi_search(client, searches):
+    """Run several independent searches in ONE HTTP request.
+
+    Worth doing here because the round trip dominates: Typesense answers a
+    typical query in ~20ms but the request costs ~180ms from this backend, so
+    two sequential searches spend ~360ms almost entirely on the wire. Batching
+    them costs one trip. Each entry carries its own `collection`, so searches
+    against different collections (keyword vs hybrid) can share a request.
+
+    Returns the per-search result list, positionally matching `searches`.
+    """
+    searches = [s for s in (searches or []) if s]
+    if not searches:
+        return []
+    response = client.multi_search.perform({"searches": searches}, {})
+    return response.get("results", [])
+
+
+def build_codes_search(item_codes, collection=None, include_inactive=0):
+    """A multi_search entry that fetches specific item codes, or None if empty."""
+    item_codes = [code for code in item_codes if code]
+    if not item_codes:
+        return None
+    joined = ",".join(_backtick_quote(code) for code in item_codes)
+    filters = [f"item_code:=[{joined}]"]
+    if not cint(include_inactive):
+        filters.append("is_active:=1")
+    return {
+        "collection": collection or get_default_collection(),
+        "q": "*",
+        "query_by": "searchable_text",
+        "filter_by": " && ".join(filters),
+        "per_page": min(len(item_codes), 250),
+        "page": 1,
+    }
+
+
+def _documents_from_result(result):
+    return [hit.get("document", {}) for hit in (result or {}).get("hits", [])]
+
+
 def get_documents_by_codes(item_codes, include_inactive=0):
     item_codes = [code for code in item_codes if code]
     if not item_codes:
         return []
     client = create_typesense_client()
-    joined_codes = ",".join(f'"{code}"' for code in item_codes)
+    # Backtick-quote each code: ~3% of item codes contain characters the filter
+    # grammar treats as syntax — "(", ")", ",", ":", "&", "|", quotes — and a
+    # double-quoted list makes Typesense reject the whole query with a 400
+    # ("Could not parse the filter query"). That took out get_product_document
+    # and everything built on it (similar / alternatives / driver lookup) for
+    # those items.
+    joined_codes = ",".join(_backtick_quote(code) for code in item_codes)
     filters = [f"item_code:=[{joined_codes}]"]
     if not cint(include_inactive):
         filters.append("is_active:=1")
@@ -1675,6 +1929,16 @@ def _within_delta(source_value, candidate_value, delta):
 
 def _escape_filter_value(value):
     return cstr(value).replace('"', '\\"')
+
+
+def _backtick_quote(value):
+    """Quote a filter literal with backticks so punctuation is treated as data.
+
+    Typesense's filter grammar has no escape sequence inside a backtick-quoted
+    literal, so any embedded backtick is dropped rather than escaped (same
+    approach as _eval_quote).
+    """
+    return "`" + cstr(value).replace("`", "") + "`"
 
 
 def _unique_strings(values):

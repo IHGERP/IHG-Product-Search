@@ -1798,14 +1798,20 @@ def _facet_values_from_typesense_multi(field_names):
     return out
 
 
+ALL_MASTERS_CACHE_KEY = "igh_search:all_masters:v2"
+# Filter-panel metadata is global and changes only when the catalogue changes,
+# so it is cheap to hold for a long time and expensive to rebuild (~1.2s: two
+# indexed DISTINCT scans over ~181k tabItem rows plus a 3-field Typesense facet
+# call with max_facet_values=1000). warm_all_masters_cache() refreshes it on a
+# schedule so the rebuild never lands on a user request.
+ALL_MASTERS_CACHE_TTL = 6 * 60 * 60
+
+
 @frappe.whitelist(allow_guest=True)
 def get_all_masters(**kwargs):
-    # Filter-panel metadata is global and changes rarely, but is expensive to
-    # build (two DISTINCT full scans over tabItem + Typesense facet calls).
-    # Cache the assembled payload in Redis (1h). Pass force_refresh=1 to rebuild.
     force_refresh = cint(kwargs.get("force_refresh") or 0)
     cache = frappe.cache()
-    cache_key = "igh_search:all_masters:v2"
+    cache_key = ALL_MASTERS_CACHE_KEY
     if not force_refresh:
         cached = cache.get_value(cache_key)
         if cached:
@@ -1883,8 +1889,23 @@ def get_all_masters(**kwargs):
         "output_current": spec_facets.get("output_current", []),
         "output_voltage": spec_facets.get("output_voltage", []),
     }
-    cache.set_value(cache_key, result, expires_in_sec=3600)
+    cache.set_value(cache_key, result, expires_in_sec=ALL_MASTERS_CACHE_TTL)
     return result
+
+
+def warm_all_masters_cache():
+    """Rebuild the filter-panel master cache on a schedule.
+
+    Runs well inside ALL_MASTERS_CACHE_TTL so the entry is always replaced before
+    it expires, which keeps the ~1.2s rebuild off the request path entirely.
+    """
+    try:
+        get_all_masters(force_refresh=1)
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            "IGH Search: get_all_masters cache warm failed",
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

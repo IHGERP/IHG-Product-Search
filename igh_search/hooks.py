@@ -162,9 +162,14 @@ doc_events.update(
             "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
             "on_trash": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
         },
+         # Incremental, like every other doctype here. This used to call
+         # initialize_syncing_item_group -> a FULL catalogue resync, so editing
+         # any item group rebuilt all ~181k documents. get_affected_item_codes()
+         # already expands an Item Group to its member items, so the normal
+         # incremental path covers this correctly.
          "Item Group": {
-             "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.initialize_syncing_item_group",
-             "on_trash": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.initialize_syncing_item_group",
+             "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
+             "on_trash": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
          },
          "Related Items": {
              "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
@@ -200,6 +205,11 @@ scheduler_events = {
         ],
         "*/30 * * * *": [
             "igh_search.igh_search.product_stock_freshness.run_stock_drift_repair"
+        ],
+        # Refresh the filter-panel masters well before their 6h TTL expires, so
+        # the ~1.2s rebuild never lands on a user's request.
+        "0 */2 * * *": [
+            "igh_search.igh_search.api.warm_all_masters_cache"
         ],
     },
 }

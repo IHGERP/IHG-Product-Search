@@ -154,6 +154,110 @@ def _log_sync_observability(level, event, payload):
     log_fn(message)
 
 
+class IntelligenceStatsAccumulator:
+    """Running tally of the same numbers _build_intelligence_stats() reports.
+
+    The streaming sync never has the full document list in hand, so the counts,
+    min/max and averages are folded in batch by batch instead.
+    """
+
+    def __init__(self):
+        self.total = 0
+        self.star_positive = 0
+        self.customer_positive = 0
+        self.manufactured_true = 0
+        self.star_sum = 0.0
+        self.star_min = None
+        self.star_max = None
+        self.customer_sum = 0
+        self.customer_min = None
+        self.customer_max = None
+
+    def add(self, v2_docs):
+        for doc in v2_docs or []:
+            rating = flt(doc.get("product_star_rating") or 0)
+            customers = int(doc.get("customer_count") or 0)
+
+            self.total += 1
+            if rating > 0:
+                self.star_positive += 1
+            if customers > 0:
+                self.customer_positive += 1
+            if int(doc.get("is_manufactured_item") or 0) == 1:
+                self.manufactured_true += 1
+
+            self.star_sum += rating
+            self.star_min = rating if self.star_min is None else min(self.star_min, rating)
+            self.star_max = rating if self.star_max is None else max(self.star_max, rating)
+
+            self.customer_sum += customers
+            self.customer_min = (
+                customers if self.customer_min is None else min(self.customer_min, customers)
+            )
+            self.customer_max = (
+                customers if self.customer_max is None else max(self.customer_max, customers)
+            )
+
+    def as_dict(self):
+        total = self.total
+        return {
+            "total_docs": total,
+            "star_rating_positive": self.star_positive,
+            "customer_count_positive": self.customer_positive,
+            "manufactured_true": self.manufactured_true,
+            "star_rating_min": self.star_min or 0,
+            "star_rating_max": self.star_max or 0,
+            "star_rating_avg": round(self.star_sum / total, 4) if total else 0,
+            "customer_count_min": self.customer_min or 0,
+            "customer_count_max": self.customer_max or 0,
+            "customer_count_avg": round(self.customer_sum / total, 4) if total else 0,
+        }
+
+
+def _record_sync_progress(log_name, batch_count, document_count):
+    """Commit a progress heartbeat onto the sync log.
+
+    Frappe rolls the transaction back when a background job is killed, so the
+    "Running" status the job sets on entry is lost and the log reverts to
+    "Queued" — which is why a sync that had been dying for days looked like it
+    had never been picked up. Committing here means the log always reflects how
+    far the run actually got.
+    """
+    if not log_name:
+        return
+    try:
+        frappe.db.set_value(
+            "Typesense Sync Log",
+            log_name,
+            {
+                "status": "Running",
+                "failure_reason": json.dumps(
+                    {
+                        "progress": "in_flight",
+                        "batches_imported": batch_count,
+                        "documents_imported": document_count,
+                        "updated_at": str(frappe.utils.now_datetime()),
+                    }
+                )[:100000],
+            },
+            update_modified=False,
+        )
+        frappe.db.commit()
+    except Exception:
+        pass
+
+
+def _merge_import_result(target, batch_result):
+    """Fold one batch's import summary into a running total."""
+    target["processed"] += cint(batch_result.get("processed") or 0)
+    target["failed"] += cint(batch_result.get("failed") or 0)
+    # Keep only a sample; a broken sync can otherwise accumulate 181k entries.
+    room = 50 - len(target["failed_items"])
+    if room > 0:
+        target["failed_items"].extend((batch_result.get("failed_items") or [])[:room])
+    return target
+
+
 def _build_intelligence_stats(v2_docs):
     docs = v2_docs or []
     total = len(docs)
@@ -214,11 +318,39 @@ def _warn_if_legacy_collection_configured():
         )
 
 
+def get_legacy_collection_name():
+    """Name of the v1 ``product`` collection this site owns.
+
+    Overridable per environment via `igh_search_legacy_collection`, for the same
+    reason as the v2 collection below.
+    """
+    return cstr(
+        (frappe.conf or {}).get("igh_search_legacy_collection") or product_schema["name"]
+    ).strip() or product_schema["name"]
+
+
 def _get_v2_sync_collections():
-    collections = [PRODUCT_V2_COLLECTION]
+    """Collections this site is allowed to WRITE to.
+
+    A site that configures its own collection (dev sets
+    `igh_search_v2_default_collection` to e.g. product_v2_dev_lumen) writes to
+    that collection ONLY. This used to unconditionally include product_v2 — the
+    live collection — so a full sync, or anything that reached the sync path, on
+    a development server rebuilt production's search index. Read and write
+    targets must agree; a site should never write somewhere it does not read.
+
+    Set `igh_search_sync_shared_v2_collection: 1` to restore the old behaviour.
+    """
     configured_default = cstr(
         get_v2_config().get("default_collection") or PRODUCT_V2_COLLECTION
     ).strip() or PRODUCT_V2_COLLECTION
+
+    if configured_default != PRODUCT_V2_COLLECTION and not cint(
+        (frappe.conf or {}).get("igh_search_sync_shared_v2_collection") or 0
+    ):
+        return [configured_default]
+
+    collections = [PRODUCT_V2_COLLECTION]
     if configured_default not in collections:
         collections.append(configured_default)
     return collections
@@ -247,11 +379,17 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
     client = client or create_client()
     started_at = time.time()
     update_sync_log(log_name, "Running", retry_count=retry_count, started=True)
+    build_targets = {}
 
     try:
         _warn_if_legacy_collection_configured()
 
-        collections = [(product_schema["name"], product_schema)]
+        # Zero-downtime reindex: every collection is built under a fresh
+        # timestamped name while the alias keeps serving the previous
+        # generation, then swapped over atomically once the import has been
+        # verified. Nothing that queries can observe is ever empty — which is
+        # what the old delete-then-refill did for ~11 minutes per sync.
+        collections = [(get_legacy_collection_name(), product_schema)]
         v2_collections = []
         if is_dual_write_enabled():
             v2_collections = _get_v2_sync_collections()
@@ -260,27 +398,58 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
                 schema["name"] = collection_name
                 collections.append((collection_name, schema))
 
-        for collection_name, schema in collections:
-            recreate_collection(client, collection_name, schema)
+        # alias name -> physical collection being built this run
+        build_targets = {}
+        for alias_name, schema in collections:
+            physical_name = build_collection_name(alias_name)
+            staged = copy.deepcopy(schema)
+            staged["name"] = physical_name
+            client.collections.create(staged)
+            build_targets[alias_name] = physical_name
 
-        payload = get_product_schema_data(version="both")
-        v1_result = import_documents_in_batches(client, product_schema["name"], payload["v1"])
+        # Stream the catalogue: build one batch of documents, ship it, drop it.
+        # Peak memory stays at roughly one batch (~50MB) instead of ~2.6GB for
+        # the whole catalogue, which is what kept getting the worker killed.
+        v1_result = {"processed": 0, "failed": 0, "failed_items": []}
+        v2_collection_results = {
+            collection_name: {"processed": 0, "failed": 0, "failed_items": []}
+            for collection_name in v2_collections
+        }
+        intelligence = IntelligenceStatsAccumulator()
+        batch_count = 0
+
+        for batch in iter_product_schema_batches():
+            _merge_import_result(
+                v1_result,
+                import_documents_in_batches(
+                    client, build_targets[get_legacy_collection_name()], batch["v1"]
+                ),
+            )
+            for collection_name in v2_collections:
+                _merge_import_result(
+                    v2_collection_results[collection_name],
+                    import_documents_in_batches(
+                        client, build_targets[collection_name], batch["v2"]
+                    ),
+                )
+            intelligence.add(batch["v2"])
+            batch_count += 1
+
+            # Commit the heartbeat so a later crash cannot roll the log back to
+            # "Queued" and hide the fact that this ran at all.
+            _record_sync_progress(log_name, batch_count, intelligence.total)
 
         v2_result = {"processed": 0, "failed": 0, "failed_items": []}
         probe_result = {}
         if is_dual_write_enabled():
-            v2_collection_results = {}
             failed_items = []
             for collection_name in v2_collections:
-                collection_result = import_documents_in_batches(
-                    client, collection_name, payload["v2"]
+                target = build_targets[collection_name]
+                sync_typesense_synonyms(client, target)
+                probe_result[collection_name] = _run_post_sync_filter_probes(client, target)
+                failed_items.extend(
+                    v2_collection_results[collection_name].get("failed_items", [])
                 )
-                sync_typesense_synonyms(client, collection_name)
-                probe_result[collection_name] = _run_post_sync_filter_probes(
-                    client, collection_name
-                )
-                v2_collection_results[collection_name] = collection_result
-                failed_items.extend(collection_result.get("failed_items", []))
 
             v2_result = {
                 "processed": sum(
@@ -296,7 +465,7 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
             }
 
         duration_ms = int((time.time() - started_at) * 1000)
-        intelligence_stats = _build_intelligence_stats(payload.get("v2") or [])
+        intelligence_stats = intelligence.as_dict()
 
         _log_sync_observability(
             "info",
@@ -311,6 +480,10 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
         )
 
         if (v1_result.get("failed") or 0) > 0 or (v2_result.get("failed") or 0) > 0:
+            # Abandon the staged collections rather than swap a broken index in.
+            # The alias still points at the previous generation, so search keeps
+            # working on the last known-good data.
+            _discard_staged_collections(client, build_targets)
             update_sync_log(
                 log_name,
                 "Failed",
@@ -327,11 +500,48 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
             )
             frappe.throw("Typesense full sync finished with import failures. Check logs for details.")
 
+        # Refuse to swap in an index that is obviously short. A rebuild that
+        # imported far fewer documents than the last good generation is the
+        # exact failure that used to leave "only a few products" on /list.
+        shortfall = _verify_staged_collections(client, build_targets)
+        if shortfall:
+            _discard_staged_collections(client, build_targets)
+            update_sync_log(
+                log_name,
+                "Failed",
+                retry_count=retry_count,
+                failure_reason=json.dumps({"shortfall": shortfall})[:100000],
+                finished=True,
+            )
+            frappe.throw(
+                f"Typesense full sync aborted: staged index too small ({shortfall}). "
+                "Previous index left in place."
+            )
+
+        swapped = {}
+        for alias_name, physical_name in build_targets.items():
+            previous = swap_alias(client, alias_name, physical_name)
+            swapped[alias_name] = {"now": physical_name, "was": previous}
+            prune_old_generations(client, alias_name)
+
+        # These collections are live now, not staged. Forget them so the error
+        # handler below can never delete what the alias is pointing at.
+        build_targets = {}
+
+        _log_sync_observability("info", "full_sync_alias_swap", {"swapped": swapped})
+
         frappe.db.set_value(
             "Typesense Settings", "Typesense Settings", "is_sync", 0, update_modified=False
         )
         update_sync_log(log_name, "Success", retry_count=retry_count, finished=True)
     except Exception:
+        # Whatever went wrong, the alias was never moved unless the swap block
+        # completed — so search is still serving the previous generation. Bin
+        # the half-built collections so retries start clean.
+        try:
+            _discard_staged_collections(client, build_targets)
+        except Exception:
+            pass
         try:
             frappe.db.set_value(
                 "Typesense Settings", "Typesense Settings", "is_sync", 0, update_modified=False
@@ -349,7 +559,13 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
 
 @frappe.whitelist()
 def initialize_syncing_item_group(self, method):
-    initialize_syncing_items()
+    """Deprecated: kept so existing hook wiring / custom scripts keep working.
+
+    This used to trigger a full catalogue resync for a single item group edit.
+    It now takes the incremental path, which expands the group to its member
+    items via get_affected_item_codes().
+    """
+    update_product_schema_data(self, method)
 
 
 @frappe.whitelist()
@@ -434,13 +650,27 @@ def _fetch_item_base_data_filtered(company, item_codes):
     return rows
 
 
-def _fetch_item_base_data_in_batches(company, batch_size=5000):
-    all_rows = []
-    offset = 0
+def iter_item_base_data(company=None, batch_size=5000):
+    """Yield enriched item rows one batch at a time.
 
+    The catalogue is far too large to hold in memory as documents (~9.4KB per v2
+    doc x ~181k items = ~1.6GB, and the full sync used to hold the v1 and v2
+    payloads simultaneously at ~2.6GB). That is what was getting the worker
+    OOM-killed mid-sync: the kill rolled back the uncommitted "Running" status
+    update, so the sync log reverted to "Queued" and looked like it had never
+    started. Callers that stream this never hold more than one batch.
+
+    Ordered by name so the LIMIT/OFFSET walk is stable — without an ORDER BY,
+    MariaDB is free to return rows in a different order per batch, which can
+    silently skip or duplicate items across the scan.
+    """
+    if company is None:
+        company = frappe.db.get_value("E Commerce Settings", "E Commerce Settings", "company")
+
+    offset = 0
     while True:
         batch_item_codes = frappe.db.sql(
-            f"SELECT name FROM `tabItem` LIMIT {batch_size} OFFSET {offset}",
+            f"SELECT name FROM `tabItem` ORDER BY name LIMIT {batch_size} OFFSET {offset}",
             as_list=1,
         )
 
@@ -459,10 +689,30 @@ def _fetch_item_base_data_in_batches(company, batch_size=5000):
 
         rows = _execute_item_base_query(item_code_filter)
         _enrich_item_rows(rows, item_price_list_data, sold_last_30_days, item_wise_stock)
-        all_rows.extend(rows)
+
+        yield rows
 
         offset += batch_size
 
+
+def iter_product_schema_batches(batch_size=5000):
+    """Yield {"v1": [...], "v2": [...]} document batches, building as we go."""
+    for rows in iter_item_base_data(batch_size=batch_size):
+        if not rows:
+            continue
+        related_map = build_related_item_map([row["item_code"] for row in rows])
+        yield {
+            "v1": build_v1_documents(rows),
+            "v2": [compute_product_v2_document(row, related_map=related_map) for row in rows],
+        }
+
+
+def _fetch_item_base_data_in_batches(company, batch_size=5000):
+    """Materialise the whole catalogue. Prefer iter_item_base_data() — this
+    holds every row in memory and only exists for callers that need a list."""
+    all_rows = []
+    for rows in iter_item_base_data(company=company, batch_size=batch_size):
+        all_rows.extend(rows)
     return all_rows
 
 
@@ -922,7 +1172,7 @@ def update_value_item_wise(updated_data, client=None, collection_name=None):
     if not updated_data:
         return
     client = client or create_client()
-    collection_name = collection_name or product_schema["name"]
+    collection_name = collection_name or get_legacy_collection_name()
     client.collections[collection_name].documents.import_(updated_data, {"action": "upsert"})
 
 
@@ -1054,7 +1304,7 @@ def update_product_schema_data_qr_job(self_data, retry_count=0, log_name=None):
         affected_item_codes = get_affected_item_codes(self_data)
         if doctype == "Item" and event_method == "on_trash":
             deleted_code = self_data.get("item_code") or self_data.get("name")
-            delete_typesense_documents(client, product_schema["name"], [deleted_code])
+            delete_typesense_documents(client, get_legacy_collection_name(), [deleted_code])
             if is_dual_write_enabled():
                 delete_typesense_documents(client, PRODUCT_V2_COLLECTION, [deleted_code])
             if affected_item_codes:
@@ -1068,9 +1318,9 @@ def update_product_schema_data_qr_job(self_data, retry_count=0, log_name=None):
             item_code for item_code in affected_item_codes if item_code not in active_v1_codes
         ]
         if missing_v1_codes:
-            delete_typesense_documents(client, product_schema["name"], missing_v1_codes)
+            delete_typesense_documents(client, get_legacy_collection_name(), missing_v1_codes)
 
-        update_value_item_wise(payload["v1"], client=client, collection_name=product_schema["name"])
+        update_value_item_wise(payload["v1"], client=client, collection_name=get_legacy_collection_name())
 
         if is_dual_write_enabled():
             active_v2_codes = {doc["item_code"] for doc in payload["v2"]}
@@ -1109,11 +1359,144 @@ def update_product_schema_data_qr_job(self_data, retry_count=0, log_name=None):
 
 
 def recreate_collection(client, collection_name, schema):
+    """Delete a collection and recreate it empty.
+
+    DESTRUCTIVE and NOT safe against live traffic: the index is gone from the
+    moment this returns until the import finishes (measured at 684s / 11min on
+    the full catalogue), and every search during that window sees an empty or
+    half-filled collection. Retained only for explicit single-collection
+    rebuilds. The full sync uses build_into_new_collection() + swap_alias()
+    instead, which never touches what queries are reading.
+    """
     try:
         client.collections[collection_name].delete()
     except typesense.exceptions.ObjectNotFound:
         pass
     client.collections.create(schema)
+
+
+# Keep this many previous generations of each collection around after a swap, so
+# a bad reindex can be rolled back by pointing the alias at the previous one.
+ALIAS_GENERATIONS_TO_KEEP = 1
+
+# A rebuild is rejected if it lands under this fraction of the documents the
+# current live generation holds. Catches a truncated source query or a partial
+# import before it becomes "/list shows six products".
+MIN_REINDEX_DOC_RATIO = 0.9
+
+
+def _collection_doc_count(client, collection_name):
+    try:
+        return cint(client.collections[collection_name].retrieve().get("num_documents"))
+    except Exception:
+        return None
+
+
+def _verify_staged_collections(client, build_targets):
+    """Return {alias: reason} for any staged collection that looks too small.
+
+    Empty dict means everything is safe to swap in.
+    """
+    problems = {}
+    for alias_name, physical_name in (build_targets or {}).items():
+        staged_count = _collection_doc_count(client, physical_name)
+        if not staged_count:
+            problems[alias_name] = "staged collection is empty"
+            continue
+
+        live_name = resolve_alias_target(client, alias_name)
+        live_count = _collection_doc_count(client, live_name) if live_name else None
+        if live_count and staged_count < live_count * MIN_REINDEX_DOC_RATIO:
+            problems[alias_name] = (
+                f"staged {staged_count} docs vs live {live_count} "
+                f"(below {MIN_REINDEX_DOC_RATIO:.0%} threshold)"
+            )
+    return problems
+
+
+def _discard_staged_collections(client, build_targets):
+    """Drop half-built collections so a failed sync leaves nothing behind."""
+    for physical_name in (build_targets or {}).values():
+        try:
+            client.collections[physical_name].delete()
+        except Exception:
+            pass
+
+
+def build_collection_name(alias_name):
+    """Timestamped physical collection name behind an alias."""
+    return f"{alias_name}_{frappe.utils.now_datetime().strftime('%Y%m%d%H%M%S')}"
+
+
+def resolve_alias_target(client, alias_name):
+    """Physical collection an alias currently points at, or None."""
+    try:
+        return client.aliases[alias_name].retrieve().get("collection_name")
+    except (typesense.exceptions.ObjectNotFound, Exception):
+        return None
+
+
+def swap_alias(client, alias_name, collection_name):
+    """Point `alias_name` at `collection_name`. This is the cutover.
+
+    Normally instantaneous: searches in flight keep reading the previous
+    generation until the upsert returns.
+
+    First run on a site that has never used aliases is the one exception — the
+    name is still held by a real collection, and Typesense will not let an alias
+    and a collection share a name. That collection is dropped here, immediately
+    before claiming the name, which leaves a gap of one API call (~1s) rather
+    than the ~11 minutes the old delete-then-refill sync was dark for. It only
+    happens once per collection; every later sync is a pure alias repoint.
+
+    The staged collection is already fully built and verified by this point, so
+    the data is safe either way.
+    """
+    previous = resolve_alias_target(client, alias_name)
+
+    if previous is None:
+        try:
+            client.collections[alias_name].retrieve()
+        except Exception:
+            pass  # name is free
+        else:
+            client.collections[alias_name].delete()
+
+    client.aliases.upsert(alias_name, {"collection_name": collection_name})
+    return previous
+
+
+def prune_old_generations(client, alias_name, keep=ALIAS_GENERATIONS_TO_KEEP):
+    """Drop superseded generations, newest-first, keeping `keep` for rollback.
+
+    Never removes whatever the alias currently points at.
+    """
+    live = resolve_alias_target(client, alias_name)
+    prefix = f"{alias_name}_"
+    try:
+        existing = [c["name"] for c in client.collections.retrieve()]
+    except Exception:
+        return []
+
+    generations = sorted(
+        (
+            name
+            for name in existing
+            if name.startswith(prefix) and name[len(prefix):].isdigit()
+        ),
+        reverse=True,
+    )
+
+    dropped = []
+    for name in generations[keep:]:
+        if name == live:
+            continue
+        try:
+            client.collections[name].delete()
+            dropped.append(name)
+        except Exception:
+            pass
+    return dropped
 
 
 def import_documents_in_batches(client, collection_name, documents, batch_size=5000):

@@ -5,3 +5,4 @@
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
 igh_search.patches.migrate_product_data_issues_to_query
+igh_search.patches.add_item_master_filter_indexes
