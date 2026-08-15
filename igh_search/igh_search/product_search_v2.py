@@ -18,6 +18,7 @@ from igh_search.igh_search.search_normalization import (
     build_searchable_text,
     build_similarity_signature,
     build_spec_summary,
+    build_stock_age_bucket,
     build_stock_bucket,
     compute_business_score,
     compute_popularity_score,
@@ -79,6 +80,7 @@ FILTER_FIELDS = {
     "in_stock",
     "stock_bucket",
     "price_bucket",
+    "stock_age_bucket",
     "is_manufactured_item",
     "lumen_output",
 }
@@ -123,6 +125,7 @@ FACET_FIELDS = [
     "in_stock",
     "stock_bucket",
     "price_bucket",
+    "stock_age_bucket",
     "is_manufactured_item",
     "product_star_rating",
     "customer_count",
@@ -162,6 +165,7 @@ SEARCH_FACET_FIELDS = [
     "warranty",
     "variant_of",
     "is_manufactured_item",
+    "stock_age_bucket",
 ]
 SEARCH_RESULT_FIELDS = (
     "item_code",
@@ -178,6 +182,8 @@ SEARCH_RESULT_FIELDS = (
     "discount_percentage",
     "stock",
     "in_stock",
+    "stock_age_days",
+    "stock_age_bucket",
     "priority_score",
     "popularity_score",
     "business_score",
@@ -318,6 +324,8 @@ PRODUCT_V2_SCHEMA = {
         {"name": "ip_rating_numeric", "type": "float", "facet": True},
         {"name": "stock_bucket", "type": "string", "facet": True},
         {"name": "price_bucket", "type": "string", "facet": True},
+        {"name": "stock_age_days", "type": "float", "optional": True},
+        {"name": "stock_age_bucket", "type": "string", "facet": True},
         {"name": "product_star_rating", "type": "float", "facet": True, "optional": True},
         {"name": "customer_count", "type": "int32", "facet": True, "optional": True},
         {"name": "total_sold_qty_lifetime", "type": "float", "optional": True},
@@ -665,6 +673,7 @@ def compute_product_v2_document(row, related_map=None):
         "stock": flt(row.get("stock")),
         "sold_last_30_days": flt(row.get("sold_last_30_days")),
         "inventory_value": flt(row.get("inventory_value")),
+        "stock_age_days": flt(row.get("last_external_purchase", -1)),
         "product_star_rating": flt(row.get("product_star_rating") or 3.5),
         "customer_count": cint(row.get("customer_count") or 0),
         "total_sold_qty_lifetime": flt(row.get("total_sold_qty_lifetime") or 0),
@@ -691,6 +700,7 @@ def compute_product_v2_document(row, related_map=None):
     document["price_bucket"] = build_price_bucket(
         document["offer_rate"] or document["rate"]
     )
+    document["stock_age_bucket"] = build_stock_age_bucket(document["stock_age_days"])
 
     manual_relationships = related_map.get(document["item_code"], {})
     document["manual_related_codes"] = manual_relationships.get("related", [])

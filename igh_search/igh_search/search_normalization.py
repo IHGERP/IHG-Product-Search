@@ -251,6 +251,21 @@ def build_price_bucket(price):
     return "premium"
 
 
+def build_stock_age_bucket(age_days):
+    age_days = flt(age_days)
+    if age_days < 0:
+        return "unknown"
+    if age_days < 365:
+        return "lt_1yr"
+    if age_days < 730:
+        return "1_2yr"
+    if age_days < 1095:
+        return "2_3yr"
+    if age_days < 1460:
+        return "3_4yr"
+    return "gt_4yr"
+
+
 def _extract_first_number(value, _unit_hint):
     match = re.search(r"(-?\d+(?:\.\d+)?)", cstr(value or ""))
     return round(flt(match.group(1)), 2) if match else 0.0

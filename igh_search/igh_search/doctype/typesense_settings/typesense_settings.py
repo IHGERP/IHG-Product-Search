@@ -533,7 +533,22 @@ def get_product_schema_data_qr_job(client=None, retry_count=0, log_name=None):
         frappe.db.set_value(
             "Typesense Settings", "Typesense Settings", "is_sync", 0, update_modified=False
         )
-        update_sync_log(log_name, "Success", retry_count=retry_count, finished=True)
+        # Clear the in-flight progress the heartbeat wrote, so a successful run
+        # does not leave a stale payload sitting in failure_reason.
+        update_sync_log(
+            log_name,
+            "Success",
+            retry_count=retry_count,
+            failure_reason="",
+            finished=True,
+        )
+        # Commit the terminal state explicitly. The heartbeat commits as it goes,
+        # so without this a crash between here and the job's own commit would
+        # leave the log stuck on the last "Running" heartbeat forever.
+        try:
+            frappe.db.commit()
+        except Exception:
+            pass
     except Exception:
         # Whatever went wrong, the alias was never moved unless the swap block
         # completed — so search is still serving the previous generation. Bin
@@ -793,7 +808,21 @@ def _execute_item_base_query(item_code_filter_item):
                     LIMIT 1
                 ),
                 -1
-            ) AS last_brought
+            ) AS last_brought,
+            COALESCE(
+                (
+                    SELECT DATEDIFF(CURDATE(), pi.posting_date)
+                    FROM `tabPurchase Invoice` AS pi
+                    JOIN `tabPurchase Invoice Item` AS pii ON pii.parent = pi.name
+                    WHERE pi.docstatus = 1
+                        AND pi.is_internal_supplier = 0
+                        AND pi.is_return = 0
+                        AND pii.item_code = it.name
+                    ORDER BY pi.posting_date DESC
+                    LIMIT 1
+                ),
+                -1
+            ) AS last_external_purchase
         FROM `tabItem` AS it
         LEFT JOIN `tabItem Group` AS ig ON it.item_group = ig.name
         LEFT JOIN `tabItem` AS parent ON parent.name = it.variant_of
