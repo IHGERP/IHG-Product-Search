@@ -16,6 +16,7 @@ from igh_search.igh_search.search_normalization import (
     build_price_bucket,
     build_search_keywords,
     build_searchable_text,
+    build_commission_bucket,
     build_similarity_signature,
     build_spec_summary,
     build_stock_age_bucket,
@@ -54,6 +55,8 @@ NUMERIC_RANGE_FILTERS = {
     "product_star_rating",
     "customer_count",
     "total_sold_qty_lifetime",
+    "commission_percentage",
+    "commission_per_unit",
 }
 FILTER_FIELDS = {
     "brand",
@@ -81,6 +84,8 @@ FILTER_FIELDS = {
     "stock_bucket",
     "price_bucket",
     "stock_age_bucket",
+    "has_commission",
+    "commission_bucket",
     "is_manufactured_item",
     "lumen_output",
 }
@@ -95,6 +100,8 @@ SORT_FIELDS = {
     "business_score",
     "creation_ts",
     "modified_ts",
+    "commission_percentage",
+    "commission_per_unit",
 }
 SORT_FIELD_ALIASES = {
     "creation": "creation_ts",
@@ -126,6 +133,8 @@ FACET_FIELDS = [
     "stock_bucket",
     "price_bucket",
     "stock_age_bucket",
+    "has_commission",
+    "commission_bucket",
     "is_manufactured_item",
     "product_star_rating",
     "customer_count",
@@ -166,6 +175,7 @@ SEARCH_FACET_FIELDS = [
     "variant_of",
     "is_manufactured_item",
     "stock_age_bucket",
+    "has_commission",
 ]
 SEARCH_RESULT_FIELDS = (
     "item_code",
@@ -184,6 +194,10 @@ SEARCH_RESULT_FIELDS = (
     "in_stock",
     "stock_age_days",
     "stock_age_bucket",
+    "commission_percentage",
+    "commission_per_unit",
+    "has_commission",
+    "commission_bucket",
     "priority_score",
     "popularity_score",
     "business_score",
@@ -326,6 +340,10 @@ PRODUCT_V2_SCHEMA = {
         {"name": "price_bucket", "type": "string", "facet": True},
         {"name": "stock_age_days", "type": "float", "optional": True},
         {"name": "stock_age_bucket", "type": "string", "facet": True},
+        {"name": "commission_percentage", "type": "float", "facet": True, "optional": True},
+        {"name": "commission_per_unit", "type": "float", "facet": True, "optional": True},
+        {"name": "has_commission", "type": "int32", "facet": True, "optional": True},
+        {"name": "commission_bucket", "type": "string", "facet": True, "optional": True},
         {"name": "product_star_rating", "type": "float", "facet": True, "optional": True},
         {"name": "customer_count", "type": "int32", "facet": True, "optional": True},
         {"name": "total_sold_qty_lifetime", "type": "float", "optional": True},
@@ -674,6 +692,7 @@ def compute_product_v2_document(row, related_map=None):
         "sold_last_30_days": flt(row.get("sold_last_30_days")),
         "inventory_value": flt(row.get("inventory_value")),
         "stock_age_days": flt(row.get("last_external_purchase", -1)),
+        "commission_percentage": flt(row.get("commission_percentage")),
         "product_star_rating": flt(row.get("product_star_rating") or 3.5),
         "customer_count": cint(row.get("customer_count") or 0),
         "total_sold_qty_lifetime": flt(row.get("total_sold_qty_lifetime") or 0),
@@ -701,6 +720,19 @@ def compute_product_v2_document(row, related_map=None):
         document["offer_rate"] or document["rate"]
     )
     document["stock_age_bucket"] = build_stock_age_bucket(document["stock_age_days"])
+
+    # Per-unit commission has to be computed here rather than in SQL: rate and
+    # offer_rate are merged into the row by _enrich_item_rows(), which runs
+    # AFTER _execute_item_base_query(). Basis is "offer_rate or rate", matching
+    # price_bucket above so the two never disagree on which price they mean.
+    # This is an estimate -- real commission is charged on the invoice line's
+    # net_amount, after any invoice-level discount.
+    _commission_price = document["offer_rate"] or document["rate"]
+    document["commission_per_unit"] = flt(
+        _commission_price * document["commission_percentage"] / 100.0, 2
+    )
+    document["has_commission"] = 1 if document["commission_percentage"] > 0 else 0
+    document["commission_bucket"] = build_commission_bucket(document["commission_percentage"])
 
     manual_relationships = related_map.get(document["item_code"], {})
     document["manual_related_codes"] = manual_relationships.get("related", [])
@@ -1862,9 +1894,9 @@ def parse_search_filters(filters):
 
 def _build_filter_clause(field_name, value):
     if isinstance(value, list):
-        numeric_list_fields = {"is_manufactured_item", "customer_count", "product_star_rating", "total_sold_qty_lifetime"}
+        numeric_list_fields = {"is_manufactured_item", "customer_count", "product_star_rating", "total_sold_qty_lifetime", "has_commission"}
         if field_name in numeric_list_fields:
-            int_fields = {"is_manufactured_item", "customer_count"}
+            int_fields = {"is_manufactured_item", "customer_count", "has_commission"}
             if field_name in int_fields:
                 nums = [str(cint(item)) for item in value if item not in (None, "")]
             else:
@@ -1876,7 +1908,7 @@ def _build_filter_clause(field_name, value):
         return [f"{field_name}:=[{joined}]"] if joined else []
     if value in (None, ""):
         return []
-    if field_name in {"is_variant", "is_active", "in_stock"}:
+    if field_name in {"is_variant", "is_active", "in_stock", "has_commission"}:
         return [f"{field_name}:={cint(value)}"]
     return [f'{field_name}:="{_escape_filter_value(value)}"']
 

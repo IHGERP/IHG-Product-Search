@@ -189,15 +189,65 @@ doc_events.update(
             "on_update": "igh_search.igh_search.product_stock_freshness.on_stock_ledger_entry_change",
             "after_insert": "igh_search.igh_search.product_stock_freshness.on_stock_ledger_entry_change",
         },
+        # Editing a commission rate must re-index just that item. on_trash
+        # matters as much as on_update: deleting the rate has to push the item
+        # back to zero commission in the index, not leave the old value there.
+        "Product Based Commission": {
+            "on_update": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
+            "on_trash": "igh_search.igh_search.doctype.typesense_settings.typesense_settings.update_product_schema_data",
+        },
     }
 )
+
+# Commission logging rides ALONGSIDE the Typesense resync on Sales Invoice.
+#
+# This has to be a merge, not a doc_events.update({"Sales Invoice": {...}}):
+# a plain update() replaces the whole "Sales Invoice" entry that the dict
+# comprehension above built, which would silently stop the catalogue from
+# re-syncing when an invoice is submitted. Frappe's append_hook() extends
+# list-valued handlers (frappe/__init__.py), so a list runs both in order.
+_COMMISSION_HOOKS = "igh_search.igh_search.commission.sales_invoice_hooks"
+doc_events["Sales Invoice"] = {
+    "on_submit": [
+        doc_events["Sales Invoice"]["on_submit"],
+        f"{_COMMISSION_HOOKS}.on_submit",
+    ],
+    "on_cancel": [
+        doc_events["Sales Invoice"]["on_cancel"],
+        f"{_COMMISSION_HOOKS}.on_cancel",
+    ],
+    # Every Sales Team field is allow_on_submit, so attribution can change
+    # after submission without firing on_submit again.
+    "on_update_after_submit": f"{_COMMISSION_HOOKS}.on_update_after_submit",
+}
+
+# Permissions
+# -----------
+# Row-level visibility for the commission ledger. Returning "" from these means
+# "no restriction", so the handlers fail closed with "1=0" for a user who
+# cannot be resolved to a Sales Person.
+
+permission_query_conditions = {
+    "Sales Commission Entry": "igh_search.igh_search.commission.permissions.commission_entry_query_conditions",
+    "Commission Payout": "igh_search.igh_search.commission.permissions.commission_payout_query_conditions",
+}
+
+has_permission = {
+    "Sales Commission Entry": "igh_search.igh_search.commission.permissions.commission_entry_has_permission",
+    "Commission Payout": "igh_search.igh_search.commission.permissions.commission_payout_has_permission",
+}
 
 # Scheduled Tasks
 # ---------------
 
 scheduler_events = {
     "daily": [
-        "igh_search.igh_search.doctype.typesense_settings.typesense_settings.initialize_syncing_items"
+        "igh_search.igh_search.doctype.typesense_settings.typesense_settings.initialize_syncing_items",
+        # Safety net: the Sales Invoice commission hooks swallow their errors so
+        # a bug can never block invoicing, and frappe.db.set_value writes to a
+        # sales team fire no document event at all. This re-runs the same
+        # idempotent sync over recent invoices to catch both.
+        "igh_search.igh_search.commission.engine.reconcile_recent_invoices",
     ],
     "cron": {
         "*/1 * * * *": [

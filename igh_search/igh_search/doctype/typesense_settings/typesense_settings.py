@@ -732,6 +732,22 @@ def _fetch_item_base_data_in_batches(company, batch_size=5000):
 
 
 def _execute_item_base_query(item_code_filter_item):
+    # Degrade gracefully if the commission doctype has not been migrated yet.
+    # Without this, deploying the code before running `bench migrate` would make
+    # every catalogue sync fail on a missing table -- and the incremental sync
+    # runs on Sales Invoice submit, so that breaks quietly in production.
+    if frappe.db.table_exists("Product Based Commission"):
+        commission_select = "COALESCE(pbc.commission_percentage, 0) AS commission_percentage"
+        # Product Based Commission is autonamed field:item, so `name` IS the item
+        # code. That makes this an eq_ref probe on the primary key rather than a
+        # scan of an unindexed Link column, which matters across ~181k items.
+        commission_join = (
+            "LEFT JOIN `tabProduct Based Commission` AS pbc "
+            "ON pbc.name = it.name AND pbc.enabled = 1"
+        )
+    else:
+        commission_select = "0 AS commission_percentage"
+        commission_join = ""
 
     rows = frappe.db.sql(
         f"""
@@ -822,10 +838,12 @@ def _execute_item_base_query(item_code_filter_item):
                     LIMIT 1
                 ),
                 -1
-            ) AS last_external_purchase
+            ) AS last_external_purchase,
+            {commission_select}
         FROM `tabItem` AS it
         LEFT JOIN `tabItem Group` AS ig ON it.item_group = ig.name
         LEFT JOIN `tabItem` AS parent ON parent.name = it.variant_of
+        {commission_join}
         WHERE 1 = 1
         {item_code_filter_item}
         """,
@@ -1273,6 +1291,13 @@ def get_affected_item_codes(self_data):
             affected.update(
                 frappe.get_all("Item", filters={"item_group": group_name}, pluck="name")
             )
+    elif doctype == "Product Based Commission":
+        # Autonamed field:item, so name == item code; `item` is read for clarity
+        # and to stay correct if the naming ever changes. Deliberately NOT
+        # expanded to variants: a commission rate applies to one exact item code.
+        item_code = self_data.get("item") or self_data.get("name")
+        if item_code:
+            affected.add(item_code)
 
     for row in self_data.get("items") or []:
         if row.get("item_code"):

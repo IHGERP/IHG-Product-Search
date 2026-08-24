@@ -251,6 +251,19 @@ def build_price_bucket(price):
     return "premium"
 
 
+def build_commission_bucket(percentage):
+    percentage = flt(percentage)
+    if percentage <= 0:
+        return "none"
+    if percentage < 2:
+        return "lt_2"
+    if percentage < 5:
+        return "2_5"
+    if percentage < 10:
+        return "5_10"
+    return "gte_10"
+
+
 def build_stock_age_bucket(age_days):
     age_days = flt(age_days)
     if age_days < 0:

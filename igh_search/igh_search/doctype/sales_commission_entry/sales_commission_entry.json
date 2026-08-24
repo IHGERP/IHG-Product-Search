@@ -1,0 +1,324 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "SCE-.YYYY.-.######",
+ "creation": "2026-08-24 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "attribution_section",
+  "sales_person",
+  "employee",
+  "branch",
+  "column_break_attribution",
+  "company",
+  "posting_date",
+  "customer",
+  "source_section",
+  "sales_invoice",
+  "sales_invoice_item",
+  "original_sales_invoice_item",
+  "column_break_source",
+  "item_code",
+  "item_name",
+  "brand",
+  "return_section",
+  "is_return",
+  "return_against",
+  "amounts_section",
+  "qty",
+  "net_amount",
+  "allocated_percentage",
+  "column_break_amounts",
+  "commission_rate",
+  "base_amount",
+  "commission_amount",
+  "payout_section",
+  "payout",
+  "payout_date",
+  "column_break_payout",
+  "source",
+  "remarks",
+  "dedup_key"
+ ],
+ "fields": [
+  {
+   "fieldname": "attribution_section",
+   "fieldtype": "Section Break",
+   "label": "Attribution"
+  },
+  {
+   "fieldname": "sales_person",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Sales Person",
+   "options": "Sales Person",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee",
+   "read_only": 1
+  },
+  {
+   "fieldname": "branch",
+   "fieldtype": "Data",
+   "label": "Branch",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_attribution",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Posting Date",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Customer",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "source_section",
+   "fieldtype": "Section Break",
+   "label": "Source Document"
+  },
+  {
+   "fieldname": "sales_invoice",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Sales Invoice",
+   "options": "Sales Invoice",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Row name of the Sales Invoice Item line. Child rows cannot be Link targets, so this is Data.",
+   "fieldname": "sales_invoice_item",
+   "fieldtype": "Data",
+   "label": "Sales Invoice Item Row",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "description": "For return rows, the original invoice line this claws back.",
+   "fieldname": "original_sales_invoice_item",
+   "fieldtype": "Data",
+   "label": "Original Sales Invoice Item Row",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_source",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Item Code",
+   "options": "Item",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "label": "Item Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "brand",
+   "fieldtype": "Data",
+   "label": "Brand",
+   "read_only": 1
+  },
+  {
+   "fieldname": "return_section",
+   "fieldtype": "Section Break",
+   "label": "Return"
+  },
+  {
+   "default": "0",
+   "fieldname": "is_return",
+   "fieldtype": "Check",
+   "in_standard_filter": 1,
+   "label": "Is Return",
+   "read_only": 1
+  },
+  {
+   "depends_on": "is_return",
+   "fieldname": "return_against",
+   "fieldtype": "Link",
+   "label": "Return Against",
+   "options": "Sales Invoice",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amounts_section",
+   "fieldtype": "Section Break",
+   "label": "Amounts"
+  },
+  {
+   "fieldname": "qty",
+   "fieldtype": "Float",
+   "label": "Qty",
+   "read_only": 1
+  },
+  {
+   "description": "The invoice line's net amount. Negative for returns.",
+   "fieldname": "net_amount",
+   "fieldtype": "Currency",
+   "label": "Line Net Amount",
+   "options": "company:company_currency",
+   "read_only": 1
+  },
+  {
+   "description": "Snapshot of the Sales Team contribution percentage at the time this was logged.",
+   "fieldname": "allocated_percentage",
+   "fieldtype": "Percent",
+   "label": "Allocated Percentage",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_amounts",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Snapshot of the item's commission rate at the time of sale. Later rate changes do not alter this row.",
+   "fieldname": "commission_rate",
+   "fieldtype": "Percent",
+   "label": "Commission Rate",
+   "read_only": 1
+  },
+  {
+   "description": "This salesperson's share of the line: net_amount x allocated_percentage / 100.",
+   "fieldname": "base_amount",
+   "fieldtype": "Currency",
+   "label": "Base Amount",
+   "options": "company:company_currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "commission_amount",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Commission Amount",
+   "options": "company:company_currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payout_section",
+   "fieldtype": "Section Break",
+   "label": "Payout"
+  },
+  {
+   "description": "Empty means unpaid. Set when a Commission Payout is submitted.",
+   "fieldname": "payout",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Payout",
+   "options": "Commission Payout",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "payout_date",
+   "fieldtype": "Date",
+   "label": "Payout Date",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_payout",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "Invoice",
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Source",
+   "options": "\nInvoice\nReturn\nAdjustment\nReversal",
+   "read_only": 1
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks",
+   "read_only": 1
+  },
+  {
+   "description": "md5(sales_invoice_item::sales_person). Unique, so the database itself refuses a duplicate log line.",
+   "fieldname": "dedup_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Dedup Key",
+   "read_only": 1,
+   "unique": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-08-24 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "IGH Search",
+ "name": "Sales Commission Entry",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Sales Manager"
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Sales User"
+  }
+ ],
+ "sort_field": "posting_date",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

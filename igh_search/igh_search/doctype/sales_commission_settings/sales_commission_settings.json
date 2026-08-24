@@ -1,0 +1,89 @@
+{
+ "actions": [],
+ "creation": "2026-08-24 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "activation_section",
+  "enabled",
+  "go_live_date",
+  "column_break_activation",
+  "reconcile_lookback_days",
+  "exclusions_section",
+  "exclude_internal_customers",
+  "excluded_companies"
+ ],
+ "fields": [
+  {
+   "fieldname": "activation_section",
+   "fieldtype": "Section Break",
+   "label": "Activation"
+  },
+  {
+   "default": "0",
+   "description": "Master switch. While unchecked, no commission entries are written by any path.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "description": "Invoices posted before this date are ignored. Set this on the day you go live.",
+   "fieldname": "go_live_date",
+   "fieldtype": "Date",
+   "label": "Go Live Date"
+  },
+  {
+   "fieldname": "column_break_activation",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "7",
+   "description": "How many days back the nightly reconcile re-checks invoices, to catch anything a failed hook missed.",
+   "fieldname": "reconcile_lookback_days",
+   "fieldtype": "Int",
+   "label": "Reconcile Lookback (Days)"
+  },
+  {
+   "fieldname": "exclusions_section",
+   "fieldtype": "Section Break",
+   "label": "Exclusions"
+  },
+  {
+   "default": "1",
+   "fieldname": "exclude_internal_customers",
+   "fieldtype": "Check",
+   "label": "Exclude Internal Customers"
+  },
+  {
+   "description": "One company name per line. Sales booked to these companies never earn commission.",
+   "fieldname": "excluded_companies",
+   "fieldtype": "Small Text",
+   "label": "Excluded Companies"
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-08-24 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "IGH Search",
+ "name": "Sales Commission Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

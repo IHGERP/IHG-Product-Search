@@ -1,0 +1,218 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "CPAY-.YYYY.-.#####",
+ "creation": "2026-08-24 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "is_submittable": 1,
+ "field_order": [
+  "payee_section",
+  "sales_person",
+  "employee",
+  "employee_name",
+  "column_break_payee",
+  "company",
+  "cutoff_date",
+  "payout_date",
+  "from_date",
+  "totals_section",
+  "total_entries",
+  "total_base_amount",
+  "total_commission",
+  "column_break_totals",
+  "adjustment_amount",
+  "adjustment_reason",
+  "payable_amount",
+  "reference_section",
+  "payment_reference",
+  "remarks",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "fieldname": "payee_section",
+   "fieldtype": "Section Break",
+   "label": "Payee"
+  },
+  {
+   "fieldname": "sales_person",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Sales Person",
+   "options": "Sales Person",
+   "reqd": 1
+  },
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee",
+   "read_only": 1
+  },
+  {
+   "fetch_from": "employee.employee_name",
+   "fieldname": "employee_name",
+   "fieldtype": "Data",
+   "label": "Employee Name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_payee",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company"
+  },
+  {
+   "description": "Inclusive. Every unpaid entry for this salesperson posted on or before this date is claimed.",
+   "fieldname": "cutoff_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Cutoff Date",
+   "reqd": 1
+  },
+  {
+   "default": "Today",
+   "fieldname": "payout_date",
+   "fieldtype": "Date",
+   "label": "Payout Date"
+  },
+  {
+   "description": "Display only. Deliberately NOT used to filter the claim -- see the comment in on_submit.",
+   "fieldname": "from_date",
+   "fieldtype": "Date",
+   "label": "Period From (display only)"
+  },
+  {
+   "fieldname": "totals_section",
+   "fieldtype": "Section Break",
+   "label": "Totals"
+  },
+  {
+   "fieldname": "total_entries",
+   "fieldtype": "Int",
+   "label": "Entries Claimed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_base_amount",
+   "fieldtype": "Currency",
+   "label": "Total Base Amount",
+   "options": "company:company_currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_commission",
+   "fieldtype": "Currency",
+   "in_list_view": 1,
+   "label": "Total Commission",
+   "options": "company:company_currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_totals",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "adjustment_amount",
+   "fieldtype": "Currency",
+   "label": "Adjustment Amount",
+   "options": "company:company_currency"
+  },
+  {
+   "depends_on": "adjustment_amount",
+   "fieldname": "adjustment_reason",
+   "fieldtype": "Small Text",
+   "label": "Adjustment Reason"
+  },
+  {
+   "fieldname": "payable_amount",
+   "fieldtype": "Currency",
+   "label": "Payable Amount",
+   "options": "company:company_currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "reference_section",
+   "fieldtype": "Section Break",
+   "label": "Reference"
+  },
+  {
+   "fieldname": "payment_reference",
+   "fieldtype": "Data",
+   "label": "Payment Reference"
+  },
+  {
+   "fieldname": "remarks",
+   "fieldtype": "Small Text",
+   "label": "Remarks"
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "Commission Payout",
+   "print_hide": 1,
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [
+  {
+   "group": "Commission",
+   "link_doctype": "Sales Commission Entry",
+   "link_fieldname": "payout"
+  }
+ ],
+ "modified": "2026-08-24 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "IGH Search",
+ "name": "Commission Payout",
+ "naming_rule": "Expression (old style)",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "cancel": 1,
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Accounts Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "read": 1,
+   "report": 1,
+   "role": "Sales Manager"
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
