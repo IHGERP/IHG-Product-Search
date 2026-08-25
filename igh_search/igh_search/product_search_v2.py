@@ -753,6 +753,71 @@ def compute_product_v2_document(row, related_map=None):
     return document
 
 
+
+@frappe.whitelist()
+def align_hybrid_collection_schema(dry_run=1):
+    """Add fields the hybrid collection is missing, in place.
+
+    The full sync rebuilds every other collection from PRODUCT_V2_SCHEMA but
+    skips product_v2_hybrid on purpose: recreating it drops the auto-embedding
+    field and triggers a multi-hour re-embed of ~190k documents. The cost of
+    that exemption is that each schema change leaves the hybrid collection a
+    field behind, and Typesense 404s the whole query when asked to facet,
+    filter or sort on a field a collection lacks.
+
+    Typesense supports adding fields to a live collection, so this closes the
+    gap without touching the vectors. Existing documents simply have no value
+    for the new fields until their next incremental upsert; every field we add
+    this way must therefore be optional.
+
+    Run with dry_run=0 to apply.
+    """
+    client = create_typesense_client()
+    collection_name = get_hybrid_collection()
+
+    try:
+        existing = {
+            f.get("name")
+            for f in (client.collections[collection_name].retrieve().get("fields") or [])
+        }
+    except Exception as exc:
+        return {"status": "error", "collection": collection_name, "message": cstr(exc)}
+
+    # `id` is Typesense's reserved document key. It never appears in a
+    # collection's field list and cannot be added as a regular field, so it
+    # would otherwise show up as permanently "missing" and fail the update.
+    missing = [
+        copy.deepcopy(field)
+        for field in PRODUCT_V2_SCHEMA["fields"]
+        if field.get("name") not in existing and field.get("name") != "id"
+    ]
+    for field in missing:
+        # A field added to a collection that already holds documents must be
+        # optional -- those documents have no value for it.
+        field["optional"] = True
+
+    if not missing:
+        return {"status": "ok", "collection": collection_name, "added": [], "message": "already aligned"}
+
+    if cint(dry_run):
+        return {
+            "status": "dry_run",
+            "collection": collection_name,
+            "would_add": [f["name"] for f in missing],
+        }
+
+    try:
+        client.collections[collection_name].update({"fields": missing})
+    except Exception as exc:
+        return {"status": "error", "collection": collection_name, "message": cstr(exc)}
+
+    try:
+        frappe.cache().delete_value("igh_search:collection_fields:" + collection_name)
+    except Exception:
+        pass
+
+    return {"status": "ok", "collection": collection_name, "added": [f["name"] for f in missing]}
+
 def delete_typesense_documents(client, collection_name, item_codes):
     if not item_codes:
         return
@@ -766,6 +831,75 @@ def delete_typesense_documents(client, collection_name, item_codes):
         )
     except typesense.exceptions.ObjectNotFound:
         return
+
+
+def collection_name_for_error(collection_name):
+    return cstr(collection_name)
+
+
+def get_collection_field_names(client, collection_name):
+    """Field names a collection actually has. Cached 5 minutes.
+
+    Collections in this app drift apart on purpose. The full sync rebuilds the
+    main collection from PRODUCT_V2_SCHEMA, but deliberately never rebuilds
+    product_v2_hybrid, because recreating it would drop the auto-embedding field
+    and force a multi-hour re-embed. So the hybrid collection can lag the main
+    one by one or more schema changes.
+
+    Typesense treats facet_by / filter_by / sort_by on an unknown field as a
+    hard 404 that fails the ENTIRE search, not as something it can ignore. That
+    turns "we added a field" into "search is down for anyone whose query routes
+    to the lagging collection". This lookup is what lets the caller degrade
+    instead of breaking.
+
+    Returns None when the collection cannot be inspected, meaning "unknown --
+    do not filter anything out".
+    """
+    cache_key = "igh_search:collection_fields:" + cstr(collection_name)
+    try:
+        cached = frappe.cache().get_value(cache_key, expires=True)
+    except Exception:
+        cached = None
+    if cached:
+        return set(cached)
+
+    try:
+        info = client.collections[collection_name].retrieve()
+    except Exception:
+        return None
+
+    names = {f.get("name") for f in (info.get("fields") or []) if f.get("name")}
+    try:
+        frappe.cache().set_value(cache_key, list(names), expires_in_sec=300)
+    except Exception:
+        pass
+    return names
+
+
+def _facet_fields_referenced(search_parameters):
+    return {
+        chunk.strip()
+        for chunk in cstr(search_parameters.get("facet_by") or "").split(",")
+        if chunk.strip()
+    }
+
+
+def _fields_referenced_by_search(search_parameters, parsed_filters):
+    """Every collection field a prepared search depends on."""
+    referenced = set(_facet_fields_referenced(search_parameters))
+
+    for key in (parsed_filters or {}):
+        field_name = key[:-6] if key.endswith("_range") else key
+        if field_name in FILTER_FIELDS or field_name in NUMERIC_RANGE_FILTERS:
+            referenced.add(field_name)
+
+    for chunk in cstr(search_parameters.get("sort_by") or "").split(","):
+        chunk = chunk.strip()
+        if not chunk or chunk.startswith("_eval"):
+            continue
+        referenced.add(chunk.split(":")[0].strip())
+
+    return {f for f in referenced if f and f != "_text_match"}
 
 
 def build_filter_by(filters=None, include_inactive=0):
@@ -1023,6 +1157,66 @@ def search_products_v2(
         if "num_typos" in search_parameters:
             search_parameters["num_typos"] = "0," + search_parameters["num_typos"]
 
+    # Guard against collection schema drift (see get_collection_field_names).
+    # Two-step degrade, cheapest first:
+    #   1. If the hybrid collection cannot serve every field this search needs,
+    #      fall back to the main collection -- losing semantic ranking is much
+    #      better than returning a 404 for the whole query.
+    #   2. Whatever collection we land on, drop facets it does not have.
+    # Both are no-ops once the collections are back in step.
+    _degraded = {}
+    _available = get_collection_field_names(client, target_collection)
+    if _available:
+        _needed = _fields_referenced_by_search(search_parameters, parsed_filters)
+        _missing = _needed - _available
+        if _missing and target_collection != get_default_collection():
+            _degraded["hybrid_disabled_missing_fields"] = sorted(_missing)
+            target_collection = get_default_collection()
+            for _key in ("query_by", "query_by_weights", "prefix", "num_typos"):
+                if _key in search_parameters and cstr(search_parameters[_key]).startswith(
+                    ("embedding,", "1,", "false,", "0,")
+                ):
+                    search_parameters[_key] = cstr(search_parameters[_key]).split(",", 1)[1]
+            search_parameters.pop("exclude_fields", None)
+            _available = get_collection_field_names(client, target_collection)
+
+        if _available and search_parameters.get("facet_by"):
+            # Facets are cosmetic: dropping one loses a sidebar count, so degrade
+            # quietly rather than failing the search.
+            _requested = [f.strip() for f in search_parameters["facet_by"].split(",") if f.strip()]
+            _usable = [f for f in _requested if f in _available]
+            if len(_usable) != len(_requested):
+                _degraded["facets_dropped"] = sorted(set(_requested) - set(_usable))
+            if _usable:
+                search_parameters["facet_by"] = ",".join(_usable)
+            else:
+                search_parameters.pop("facet_by", None)
+
+        if _available:
+            # Filters and sorts are NOT cosmetic. Silently dropping a filter
+            # returns unfiltered results that look plausible and are wrong --
+            # strictly worse than an error. Fail loudly, and say what to do.
+            _hard = (
+                _fields_referenced_by_search(search_parameters, parsed_filters)
+                - _facet_fields_referenced(search_parameters)
+                - _available
+            )
+            if _hard:
+                frappe.throw(
+                    _(
+                        "Search collection {0} has no field(s): {1}. The index is behind the "
+                        "application schema -- run a full catalogue sync (and "
+                        "align_hybrid_collection_schema for the hybrid collection) before "
+                        "filtering or sorting on them."
+                    ).format(collection_name_for_error(target_collection), ", ".join(sorted(_hard))),
+                    title=_("Search index out of date"),
+                )
+
+    if _degraded:
+        log_search_request("collection_schema_degrade", {
+            "collection": target_collection, "degraded": _degraded,
+        })
+
     log_search_request(
         "request",
         {
@@ -1093,6 +1287,8 @@ def search_products_v2(
         "fallback_reasons": sort_resolution["fallback_reasons"],
         "search_parameters": search_parameters,
         "latency_ms": latency_ms,
+        "collection": target_collection,
+        "degraded": _degraded or None,
         "stock_reconcile": {
             "freshness_source": stock_reconcile.get("freshness_source", "index"),
             "checked_count": cint(stock_reconcile.get("checked_count") or 0),
