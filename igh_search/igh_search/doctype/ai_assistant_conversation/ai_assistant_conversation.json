@@ -23,7 +23,8 @@
   "data_section",
   "user_queries",
   "product_codes",
-  "messages_json"
+  "messages_json",
+  "workspace_json"
  ],
  "fields": [
   {
@@ -130,6 +131,12 @@
    "fieldname": "messages_json",
    "fieldtype": "Long Text",
    "label": "Messages JSON"
+  },
+  {
+   "fieldname": "workspace_json",
+   "fieldtype": "Long Text",
+   "label": "Workspace state",
+   "hidden": 1
   }
  ],
  "index_web_pages_for_search": 0,

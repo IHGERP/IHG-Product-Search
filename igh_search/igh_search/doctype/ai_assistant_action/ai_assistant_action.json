@@ -1,0 +1,61 @@
+{
+ "doctype": "DocType",
+ "name": "AI Assistant Action",
+ "module": "IGH Search",
+ "autoname": "hash",
+ "engine": "InnoDB",
+ "field_order": [
+  "assistant_user",
+  "conversation_id",
+  "status",
+  "expires_at",
+  "payload_json",
+  "result_json"
+ ],
+ "fields": [
+  {
+   "fieldname": "assistant_user",
+   "fieldtype": "Link",
+   "options": "User",
+   "label": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "conversation_id",
+   "fieldtype": "Data",
+   "label": "Conversation",
+   "reqd": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "options": "Pending\nCompleted",
+   "label": "Status",
+   "default": "Pending"
+  },
+  {
+   "fieldname": "expires_at",
+   "fieldtype": "Datetime",
+   "label": "Expires at",
+   "reqd": 1
+  },
+  {
+   "fieldname": "payload_json",
+   "fieldtype": "Long Text",
+   "label": "Preview",
+   "reqd": 1
+  },
+  {
+   "fieldname": "result_json",
+   "fieldtype": "Long Text",
+   "label": "Receipt"
+  }
+ ],
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1
+  }
+ ],
+ "track_changes": 1
+}

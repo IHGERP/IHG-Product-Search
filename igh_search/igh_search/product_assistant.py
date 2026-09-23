@@ -365,24 +365,7 @@ def _run_tool(name, args):
                                 for d in (r.get("drivers") or [])[:6]]}
 
         if name == "add_to_cart":
-            from igh_search.igh_search.api import insert_cart_items
-            requested = args.get("items") or []
-            added, failed = [], []
-            last = None
-            for entry in requested:
-                code = cstr(entry.get("item_code")).strip()
-                qty = entry.get("qty") or 1
-                if not code:
-                    continue
-                res = insert_cart_items(item_code=code, qty=qty)
-                if (res or {}).get("status") == "success":
-                    added.append({"item_code": code, "qty": qty})
-                    last = res
-                else:
-                    failed.append({"item_code": code, "error": (res or {}).get("message", "failed")})
-            return {"added": added, "failed": failed,
-                    "cart_total": (last or {}).get("grand_total"),
-                    "message": f"Added {len(added)} item(s) to the cart." if added else "Nothing added."}
+            return {"error": "Use the sales workspace assistant to prepare a visible confirmation. No items were added."}
 
         return {"error": f"unknown tool {name}"}
     except Exception as exc:

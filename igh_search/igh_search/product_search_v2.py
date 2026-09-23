@@ -450,14 +450,14 @@ def get_v2_config():
 # stock numbers on a cached result page can be — the runtime stock reconcile only
 # runs on a miss — so it trades freshness for latency. Tune with
 # `igh_search_response_cache_ttl` in site_config; 0 disables the cache entirely.
-DEFAULT_RESPONSE_CACHE_TTL = 180
+DEFAULT_RESPONSE_CACHE_TTL = 30
 
 
 def get_response_cache_ttl():
     raw = (frappe.conf or {}).get("igh_search_response_cache_ttl")
     if raw in (None, ""):
         return DEFAULT_RESPONSE_CACHE_TTL
-    return max(cint(raw), 0)
+    return min(max(cint(raw), 0), 30)
 
 
 def is_dual_write_enabled():
@@ -1042,6 +1042,10 @@ def search_products_v2(
 ):
     ensure_query_access(feature_flag_override=feature_flag_override)
 
+    if cint(include_inactive) and "System Manager" not in frappe.get_roles():
+        frappe.throw("Only a System Manager can include inactive products", frappe.PermissionError)
+    from igh_search.igh_search.search_policy import literal_parameters
+    literal_enabled = cint((frappe.conf or {}).get("igh_search_literal_enabled", 1))
     started_at = time.perf_counter()
 
     # Short-TTL response cache. Absorbs prod variance (Typesense / gunicorn
@@ -1058,20 +1062,28 @@ def search_products_v2(
                 else json.dumps(filters or {}, sort_keys=True, default=str)
             )
             _cache_payload = {
-                "query": cstr(query or ""),
+                "query": normalize_text(query),
+                "site": frappe.local.site,
+                "user": frappe.session.user,
+                "roles": sorted(frappe.get_roles()),
+                "collection": get_default_collection(),
+                "literal_enabled": literal_enabled,
+                "soft_boosts": soft_boosts,
+                "use_hybrid": use_hybrid,
+                "hybrid_enabled": is_hybrid_enabled(),
                 "filters": _cache_filters,
                 "sort_by": cstr(sort_by or ""),
                 "page": cint(page),
                 "page_length": cint(per_page or page_length),
                 "include_inactive": cint(include_inactive),
-                "item_code_hint": cstr(item_code_hint or ""),
+                "item_code_hint": normalize_text(item_code_hint),
                 "strict_sort": cint(strict_sort),
                 "facets": _wants_facets(page, include_facets),
             }
             _digest = hashlib.md5(
                 json.dumps(_cache_payload, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()
-            cache_key = "igh_search:search:v1:" + _digest
+            cache_key = "igh_search:search:v3:" + _digest
     except Exception:
         cache_key = None
 
@@ -1101,8 +1113,6 @@ def search_products_v2(
     if per_page not in (None, ""):
         page_length = per_page
 
-    if per_page not in (None, ):
-        page_length = per_page
 
     search_parameters = {
         "q": query_text,
@@ -1132,7 +1142,10 @@ def search_products_v2(
         tail = [s for s in cstr(search_parameters["sort_by"]).split(",") if s.strip()][:2]
         search_parameters["sort_by"] = ",".join([boost_clause] + tail)
 
-    if sku_like:
+    literal = literal_parameters(query_text) if literal_enabled else {}
+    if literal:
+        search_parameters.update(literal)
+    elif sku_like:
         search_parameters["prefix"] = "true,true,false,false,false,false,false,false,false,false"
         search_parameters["num_typos"] = "0,0,1,1,1,1,1,1,1,1"
         search_parameters["max_candidates"] = 10000
@@ -1147,6 +1160,7 @@ def search_products_v2(
         and is_hybrid_enabled()
         and query_text not in ("", "*")
         and not sku_like
+        and not literal
     ):
         target_collection = get_hybrid_collection()
         search_parameters["query_by"] = "embedding," + search_parameters["query_by"]
@@ -1234,9 +1248,12 @@ def search_products_v2(
         },
     )
 
+    index_started = time.perf_counter()
     response = client.collections[target_collection].documents.search(
         search_parameters
     )
+    index_ms = round((time.perf_counter() - index_started) * 1000)
+    stock_started = time.perf_counter()
 
     stock_reconcile = {
         "freshness_source": "index",
@@ -1265,8 +1282,8 @@ def search_products_v2(
             "IGH Search V2: stock runtime reconcile failed",
         )
 
-    if sort_resolution["should_rerank"]:
-        response["hits"] = rank_search_hits(response.get("hits", []), query_text)
+    # Typesense ranks the complete result set; never reorder one page in isolation.
+    stock_ms = round((time.perf_counter() - stock_started) * 1000)
 
     latency_ms = int((time.perf_counter() - started_at) * 1000)
     try:
@@ -1295,6 +1312,9 @@ def search_products_v2(
             "reconciled_count": cint(stock_reconcile.get("reconciled_count") or 0),
         },
     }
+    response["freshness_ts"] = now_datetime().isoformat()
+    response["timings"] = {"index_roundtrip_ms": index_ms, "stock_ms": stock_ms, "total_ms": latency_ms}
+    response["matching_mode"] = "literal" if literal else "standard"
     if cache_key:
         try:
             frappe.cache().set_value(cache_key, response, expires_in_sec=cache_ttl)
@@ -1963,7 +1983,7 @@ def resolve_sort_by(sort_by, sku_like=False, strict_sort=False):
 
 def is_sku_like(value):
     normalized = normalize_item_code(value)
-    raw_value = cstr(value or "").strip()
+    raw_value = cstr(value or "").strip().upper()
     is_compact_code = bool(re.match(r"^[A-Za-z0-9._/-]+$", raw_value))
     is_uppercase_alpha_code = bool(re.match(r"^[A-Z._/-]*[A-Z][A-Z._/-]*$", raw_value))
     return (
