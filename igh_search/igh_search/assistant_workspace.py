@@ -108,9 +108,35 @@ def _validate_search(search):
         offer_range = filters.setdefault("offer_rate_range", {})
         if flt(offer_range.get("min")) <= 0:
             offer_range["min"] = 0.01
-    for field in filters:
+
+    aliases = {
+        "input": "input_voltage",
+        "color_temp_": "color_temp",
+        "warranty_": "warranty",
+        "manufactured_item": "is_manufactured_item",
+        "star_rating_range": "product_star_rating_range",
+        "rating_range": "product_star_rating_range",
+        "happy_customers_range": "customer_count_range",
+        "invoice_count_range": "customer_count_range",
+        "customer_invoice_count_range": "customer_count_range",
+        "lumen": "lumen_output",
+        "current_output": "output_current",
+        "voltage_output": "output_voltage",
+    }
+    for alias, canonical in aliases.items():
+        value = filters.pop(alias, None)
+        if value not in (None, "", [], {}) and filters.get(canonical) in (None, "", [], {}):
+            filters[canonical] = value
+
+    for field in list(filters):
         base = field[:-6] if field.endswith("_range") else field
         if field not in FILTER_FIELDS and base not in NUMERIC_RANGE_FILTERS:
+            value = filters[field]
+            if value in (None, "", False, [], {}) or (
+                isinstance(value, dict) and not any(v not in (None, "") for v in value.values())
+            ):
+                filters.pop(field, None)
+                continue
             frappe.throw("Unsupported filter: " + field)
         if field in {"is_active", "disabled"}:
             frappe.throw("Inactive visibility must use the permitted catalogue control")
