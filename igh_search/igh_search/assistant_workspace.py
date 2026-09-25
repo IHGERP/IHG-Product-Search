@@ -100,7 +100,15 @@ def _check_version(state, version):
 
 def _validate_search(search):
     from igh_search.igh_search.product_search_v2 import FILTER_FIELDS, NUMERIC_RANGE_FILTERS, SORT_FIELDS
-    for field in search.get("filters", {}):
+    filters = search.setdefault("filters", {})
+    # Older and cached frontends may publish this UI-only toggle. Normalize it
+    # to the indexed offer-rate range instead of rejecting the whole AI turn.
+    show_promotion = filters.pop("show_promotion", False)
+    if cint(show_promotion):
+        offer_range = filters.setdefault("offer_rate_range", {})
+        if flt(offer_range.get("min")) <= 0:
+            offer_range["min"] = 0.01
+    for field in filters:
         base = field[:-6] if field.endswith("_range") else field
         if field not in FILTER_FIELDS and base not in NUMERIC_RANGE_FILTERS:
             frappe.throw("Unsupported filter: " + field)
