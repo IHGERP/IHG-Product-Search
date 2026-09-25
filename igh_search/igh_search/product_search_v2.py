@@ -1125,6 +1125,16 @@ def search_products_v2(
         "include_fields": ",".join(SEARCH_RESULT_FIELDS),
     }
 
+    # A catalogue browse uses q="*". Sorting every document by _text_match is
+    # needlessly expensive because there is no text match to rank. Use the two
+    # indexed business fields instead; typed searches retain relevance-first
+    # ranking below.
+    if query_text == "*" and not cstr(sort_by or "").strip():
+        browse_sort = "in_stock:desc,business_score:desc"
+        search_parameters["sort_by"] = browse_sort
+        sort_resolution["final_sort"] = browse_sort
+        sort_resolution["fallback_reasons"] = list(sort_resolution["fallback_reasons"]) + ["browse_sort"]
+
     # Facet counts depend only on the query + filter set, never on which page of
     # results you asked for — so computing them again on page 2+ buys nothing and
     # costs ~180ms of Typesense compute. Callers paging through a result set keep
