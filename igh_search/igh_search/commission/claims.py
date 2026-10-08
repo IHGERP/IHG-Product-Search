@@ -153,7 +153,7 @@ def _entry_rows(sales_person, month_start, month_end):
 	for row in older:
 		source_month = getdate(row.posting_date).replace(day=1)
 		older_totals[source_month] = flt(
-			older_totals.get(source_month) + flt(row.commission_amount), 2
+			older_totals.get(source_month, 0) + flt(row.commission_amount), 2
 		)
 	late = [
 		row for row in older
