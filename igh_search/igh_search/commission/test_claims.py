@@ -90,6 +90,7 @@ class TestCommissionClaims(FrappeTestCase):
 		self.assertEqual(promotion.type_of_promotions, "Product Promotion")
 		self.assertEqual(promotion.party, "EMP-001")
 		self.assertEqual(promotion.amount, 25)
+		self.assertEqual(promotion.reason_for_claim, "Monthly Product commission claim for 2026-09")
 		self.assertEqual(len(promotion.information), 2)
 		self.assertEqual(promotion.information[0]["reference_name"], "Sales Commission Entry")
 		self.assertEqual(promotion.information[0]["voucher_number"], "SCE-1")

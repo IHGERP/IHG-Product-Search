@@ -278,7 +278,7 @@ def _new_promotion(claimant, preview, idempotency_key):
 		"party": employee.name,
 		"party_name": employee.employee_name,
 		"branch": employee.branch,
-		"reason_for_claim": _("Monthly sales commission claim for {0}").format(preview["month"]),
+		"reason_for_claim": _("Monthly Product commission claim for {0}").format(preview["month"]),
 		"amount": preview["total_amount"],
 		"custom_company": employee.company,
 		"custom_cost_center": employee.payroll_cost_center,
