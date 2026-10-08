@@ -18,6 +18,8 @@ class CommissionPayout(Document):
 		self.claim_entries()
 
 	def on_cancel(self):
+		if self.promotion_claim:
+			frappe.throw(_("A Promotion-generated commission payout cannot be cancelled independently."))
 		self.release_entries()
 
 	# ------------------------------------------------------------------
@@ -25,7 +27,7 @@ class CommissionPayout(Document):
 	# ------------------------------------------------------------------
 
 	def claim_entries(self):
-		"""Stamp every unpaid entry for this salesperson up to the cutoff.
+		"""Stamp available entries for a manual payout or one Promotion claim.
 
 		Why there is no ``from_date`` in this WHERE clause, despite the field
 		existing on the form: an entry for an August invoice can be *created* in
@@ -41,6 +43,31 @@ class CommissionPayout(Document):
 		locks, so two payouts submitted concurrently for the same salesperson
 		serialise, and the second one matches none of the rows the first claimed.
 		"""
+		params = {
+			"payout": self.name,
+			"payout_date": self.payout_date,
+			"now": now(),
+			"user": frappe.session.user,
+			"sales_person": self.sales_person,
+			"cutoff_date": self.cutoff_date,
+			"promotion_claim": self.promotion_claim,
+		}
+		if self.promotion_claim:
+			where = """
+				promotion_claim = %(promotion_claim)s
+				AND sales_person = %(sales_person)s
+				AND (payout IS NULL OR payout = '')
+			"""
+		else:
+			# Manual payouts must never take rows already reserved by a pending
+			# salesperson Promotion claim.
+			where = """
+				sales_person = %(sales_person)s
+				AND posting_date <= %(cutoff_date)s
+				AND (payout IS NULL OR payout = '')
+				AND (promotion_claim IS NULL OR promotion_claim = '')
+			"""
+
 		frappe.db.sql(
 			"""
 			UPDATE `tabSales Commission Entry`
@@ -48,18 +75,9 @@ class CommissionPayout(Document):
 			       payout_date = %(payout_date)s,
 			       modified = %(now)s,
 			       modified_by = %(user)s
-			 WHERE sales_person = %(sales_person)s
-			   AND posting_date <= %(cutoff_date)s
-			   AND (payout IS NULL OR payout = '')
-			""",
-			{
-				"payout": self.name,
-				"payout_date": self.payout_date,
-				"now": now(),
-				"user": frappe.session.user,
-				"sales_person": self.sales_person,
-				"cutoff_date": self.cutoff_date,
-			},
+			 WHERE {where}
+			""".format(where=where),
+			params,
 		)
 
 		# Totals must be read back from what was actually claimed. Computing them
@@ -77,11 +95,13 @@ class CommissionPayout(Document):
 		)[0]
 
 		if not claimed.n:
-			frappe.throw(
-				_("No unpaid commission entries found for {0} up to {1}.").format(
-					self.sales_person, self.cutoff_date
-				)
-			)
+			if self.promotion_claim:
+				frappe.throw(_("No reserved commission entries found for claim {0}.").format(
+					self.promotion_claim
+				))
+			frappe.throw(_("No available commission entries found for {0} up to {1}.").format(
+				self.sales_person, self.cutoff_date
+			))
 
 		self.db_set(
 			{

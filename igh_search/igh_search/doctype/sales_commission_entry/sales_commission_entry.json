@@ -35,6 +35,7 @@
   "base_amount",
   "commission_amount",
   "payout_section",
+  "promotion_claim",
   "payout",
   "payout_date",
   "column_break_payout",
@@ -236,6 +237,16 @@
    "fieldname": "payout_section",
    "fieldtype": "Section Break",
    "label": "Payout"
+  },
+  {
+   "description": "Promotion reserving this entry while a salesperson commission claim is under approval.",
+   "fieldname": "promotion_claim",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Promotion Claim",
+   "options": "Promotion",
+   "read_only": 1,
+   "search_index": 1
   },
   {
    "description": "Empty means unpaid. Set when a Commission Payout is submitted.",

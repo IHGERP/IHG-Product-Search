@@ -221,6 +221,14 @@ doc_events["Sales Invoice"] = {
     "on_update_after_submit": f"{_COMMISSION_HOOKS}.on_update_after_submit",
 }
 
+# Promotion remains owned by ihgind_custom. These handlers only act on records
+# carrying our hidden commission-claim marker, leaving every existing Promotion
+# type and workflow path untouched.
+doc_events["Promotion"] = {
+    "before_validate": "igh_search.igh_search.commission.claims.before_promotion_save",
+    "on_update": "igh_search.igh_search.commission.claims.on_promotion_update",
+}
+
 # Permissions
 # -----------
 # Row-level visibility for the commission ledger. Returning "" from these means

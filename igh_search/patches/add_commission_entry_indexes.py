@@ -17,6 +17,8 @@ import frappe
 INDEXES = (
 	("sales_person", "payout", "posting_date"),
 	("payout", "sales_person"),
+	("sales_person", "promotion_claim", "posting_date"),
+	("promotion_claim", "sales_person"),
 )
 
 

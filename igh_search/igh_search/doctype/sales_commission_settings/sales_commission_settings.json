@@ -8,6 +8,7 @@
   "activation_section",
   "enabled",
   "go_live_date",
+  "enable_salesperson_commission_claims",
   "column_break_activation",
   "reconcile_lookback_days",
   "exclusions_section",
@@ -32,6 +33,13 @@
    "fieldname": "go_live_date",
    "fieldtype": "Date",
    "label": "Go Live Date"
+  },
+  {
+   "default": "0",
+   "description": "Allow linked salespeople to submit completed-month commission claims into the Promotion workflow.",
+   "fieldname": "enable_salesperson_commission_claims",
+   "fieldtype": "Check",
+   "label": "Enable Salesperson Commission Claims"
   },
   {
    "fieldname": "column_break_activation",

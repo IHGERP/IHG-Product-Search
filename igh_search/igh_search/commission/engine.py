@@ -351,7 +351,7 @@ def sync_invoice_entries(si, source="Invoice"):
 	for row in frappe.get_all(
 		"Sales Commission Entry",
 		filters={"sales_invoice": si.name},
-		fields=["name", "sales_invoice_item", "sales_person", "payout", "source",
+		fields=["name", "sales_invoice_item", "sales_person", "payout", "promotion_claim", "source",
 				"commission_amount", "base_amount"],
 	):
 		groups.setdefault(_group_key(row.sales_invoice_item, row.sales_person), []).append(row)
@@ -369,7 +369,7 @@ def sync_invoice_entries(si, source="Invoice"):
 
 		if base_row is None:
 			_insert(want)
-		elif len(group) == 1 and not base_row.payout:
+		elif len(group) == 1 and not base_row.payout and not base_row.promotion_claim:
 			# Clean case: a single unpaid row. Correct it in place so the ledger
 			# stays one row per position rather than accreting corrections.
 			frappe.db.set_value(
@@ -398,11 +398,12 @@ def _same_money(left, right):
 def _retire_group(group, reason):
 	"""Take a position back to zero.
 
-	Unpaid rows are simply removed. If anything in the position has been paid,
-	the settled rows stay untouched and a negative unpaid row cancels them out,
+	Available rows are simply removed. If anything in the position has been paid
+	or reserved by a claim, those rows stay untouched and an available negative
+	row cancels them out,
 	so the reduction lands in the next payout instead of rewriting history.
 	"""
-	if not any(r.payout for r in group):
+	if not any(r.payout or r.promotion_claim for r in group):
 		for row in group:
 			frappe.delete_doc("Sales Commission Entry", row.name, force=1, ignore_permissions=True)
 		return
@@ -432,7 +433,7 @@ def remove_invoice_entries(si):
 	for row in frappe.get_all(
 		"Sales Commission Entry",
 		filters={"sales_invoice": si.name},
-		fields=["name", "sales_invoice_item", "sales_person", "payout", "source",
+		fields=["name", "sales_invoice_item", "sales_person", "payout", "promotion_claim", "source",
 				"commission_amount", "base_amount"],
 	):
 		groups.setdefault(_group_key(row.sales_invoice_item, row.sales_person), []).append(row)

@@ -26,6 +26,7 @@
   "adjustment_reason",
   "payable_amount",
   "reference_section",
+  "promotion_claim",
   "payment_reference",
   "remarks",
   "amended_from"
@@ -142,6 +143,16 @@
    "fieldname": "reference_section",
    "fieldtype": "Section Break",
    "label": "Reference"
+  },
+  {
+   "description": "Automated Promotion claim that generated this payout.",
+   "fieldname": "promotion_claim",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Promotion Claim",
+   "options": "Promotion",
+   "read_only": 1,
+   "unique": 1
   },
   {
    "fieldname": "payment_reference",
