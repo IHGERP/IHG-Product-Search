@@ -7,7 +7,11 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from igh_search.igh_search.commission.claims import _entry_rows, _new_promotion
+from igh_search.igh_search.commission.claims import (
+	_entry_rows,
+	_new_promotion,
+	before_promotion_save,
+)
 
 
 class DummyPromotion:
@@ -25,6 +29,22 @@ class DummyPromotion:
 
 
 class TestCommissionClaims(FrappeTestCase):
+	def test_paid_claim_cannot_leave_paid_state(self):
+		class PaidClaim:
+			workflow_state = "Draft"
+
+			def get(self, fieldname):
+				return 1 if fieldname == "custom_is_commission_claim" else None
+
+			def is_new(self):
+				return False
+
+			def get_doc_before_save(self):
+				return frappe._dict(workflow_state="Paid")
+
+		with self.assertRaises(frappe.ValidationError):
+			before_promotion_save(PaidClaim())
+
 	@patch("igh_search.igh_search.commission.claims._claimed_source_months")
 	@patch("igh_search.igh_search.commission.claims.frappe.db.sql")
 	def test_late_adjustments_do_not_sweep_positive_unclaimed_months(self, sql, claimed_months):
@@ -73,4 +93,3 @@ class TestCommissionClaims(FrappeTestCase):
 		self.assertEqual(len(promotion.information), 2)
 		self.assertEqual(promotion.information[0]["reference_name"], "Sales Commission Entry")
 		self.assertEqual(promotion.information[0]["voucher_number"], "SCE-1")
-
