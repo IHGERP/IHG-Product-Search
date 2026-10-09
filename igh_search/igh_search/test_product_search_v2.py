@@ -67,6 +67,13 @@ class TestProductSearchV2(FrappeTestCase):
         self.assertIn("stock:>=1.0", filter_by)
         self.assertIn("stock:<=50.0", filter_by)
 
+    def test_build_filter_by_only_applies_commission_when_enabled(self):
+        without_commission_filter = build_filter_by(filters={"has_commission": False})
+        with_commission_filter = build_filter_by(filters={"has_commission": True})
+
+        self.assertNotIn("has_commission", without_commission_filter)
+        self.assertIn("has_commission:=1", with_commission_filter)
+
     def test_rank_search_hits_prefers_exact_sku(self):
         hits = [
             {

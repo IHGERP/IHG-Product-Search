@@ -919,6 +919,11 @@ def build_filter_by(filters=None, include_inactive=0):
 
     for key, value in filters.items():
         if key in FILTER_FIELDS:
+            # Commission is exposed as an opt-in UI toggle. False/0 means the
+            # filter is inactive; treating it as `has_commission:=0` hides all
+            # commissioned catalogue items from otherwise unfiltered searches.
+            if key == "has_commission" and not cint(value):
+                continue
             clauses.extend(_build_filter_clause(key, value))
             continue
 
