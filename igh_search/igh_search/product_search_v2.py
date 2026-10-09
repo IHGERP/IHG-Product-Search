@@ -1139,6 +1139,8 @@ def search_products_v2(
         "sort_by": sort_resolution["final_sort"],
         "include_fields": ",".join(SEARCH_RESULT_FIELDS),
     }
+    base_filter_by = build_filter_by(filters={}, include_inactive=include_inactive)
+    has_effective_user_filters = search_parameters["filter_by"] != base_filter_by
 
     if multi_item_codes:
         normalized_codes = [normalize_item_code(code) for code in multi_item_codes]
@@ -1297,7 +1299,7 @@ def search_products_v2(
         # An exact item-code lookup should remain available when Typesense is
         # briefly unreachable. ERP is authoritative for these records, and the
         # frontend clears catalogue filters before exact-code searches.
-        if exact_fallback_codes and not parsed_filters:
+        if exact_fallback_codes and not has_effective_user_filters:
             frappe.log_error(
                 frappe.get_traceback(),
                 "IGH Search V2: Typesense unavailable; exact SKU fallback used",

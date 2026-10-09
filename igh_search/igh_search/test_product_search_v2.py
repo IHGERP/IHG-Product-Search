@@ -311,7 +311,14 @@ class TestProductSearchV2(FrappeTestCase):
         ) as fallback_mock, patch(
             "igh_search.igh_search.product_search_v2.frappe.log_error"
         ):
-            response = search_products_v2(query="FM121011.XGR.09.120")
+            response = search_products_v2(
+                query="FM121011.XGR.09.120",
+                filters={
+                    "brand": [],
+                    "has_commission": False,
+                    "rate_range": {"min": "", "max": ""},
+                },
+            )
 
         fallback_mock.assert_called_once_with(
             ["FM121011.XGR.09.120"],
