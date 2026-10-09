@@ -7,6 +7,7 @@ from igh_search.igh_search.product_search_v2 import (
     build_filter_by,
     calculate_similarity_score,
     get_product_v2_schema,
+    parse_item_code_list,
     parse_search_filters,
     rank_search_hits,
     resolve_effective_query,
@@ -35,7 +36,10 @@ class TestProductSearchV2(FrappeTestCase):
 
         class FakeCollections(dict):
             def __getitem__(self, key):
-                return dict.__getitem__(self, key)
+                # Production may override the collection name in site_config.
+                # Every fake collection shares the same document endpoint so
+                # these unit tests stay independent of the site they run on.
+                return dict.get(self, key) or dict.__getitem__(self, "product_v2")
 
         class FakeClient:
             def __init__(self, payload):
@@ -140,6 +144,15 @@ class TestProductSearchV2(FrappeTestCase):
         self.assertEqual(resolution["effective_query"], "dl-100")
         self.assertTrue(resolution["sku_like"])
 
+    def test_parse_item_code_list_accepts_common_paste_separators(self):
+        self.assertEqual(
+            parse_item_code_list("FM121011.XGR.09.120, LF1122.G.XGR.30.WP\nDL-100"),
+            ["FM121011.XGR.09.120", "LF1122.G.XGR.30.WP", "DL-100"],
+        )
+
+    def test_parse_item_code_list_rejects_natural_language(self):
+        self.assertEqual(parse_item_code_list("downlights, warm white"), [])
+
     def test_resolve_sort_by_maps_creation_alias(self):
         sort_resolution = resolve_sort_by("creation:desc")
         self.assertEqual(sort_resolution["aliased_sort"], "creation_ts:desc")
@@ -237,3 +250,30 @@ class TestProductSearchV2(FrappeTestCase):
             fake_client.collections["product_v2"].documents.last_search_parameters["q"],
             "dl-100",
         )
+
+    @patch("igh_search.igh_search.product_search_v2.ensure_query_access")
+    @patch("igh_search.igh_search.product_search_v2.create_typesense_client")
+    @patch("igh_search.igh_search.product_search_v2.rank_search_hits", return_value=[])
+    def test_search_products_v2_filters_pasted_item_code_list_exactly(
+        self, _rank_search_hits_mock, create_client_mock, _ensure_query_access_mock
+    ):
+        fake_client = self._make_fake_client({"hits": [], "found": 0, "facet_counts": []})
+        create_client_mock.return_value = fake_client
+
+        with patch(
+            "igh_search.igh_search.product_search_v2.get_response_cache_ttl",
+            return_value=0,
+        ):
+            response = search_products_v2(
+                query="FM121011.XGR.09.120,LF1122.G.XGR.30.WP",
+                filters={"brand": ["LUMI"]},
+            )
+
+        parameters = fake_client.collections["product_v2"].documents.last_search_parameters
+        self.assertEqual(parameters["q"], "*")
+        self.assertIn("brand:=[\"LUMI\"]", parameters["filter_by"])
+        self.assertIn(
+            "item_code_normalized:=[`FM121011XGR09120`,`LF1122GXGR30WP`]",
+            parameters["filter_by"],
+        )
+        self.assertEqual(response["matching_mode"], "item_code_list")

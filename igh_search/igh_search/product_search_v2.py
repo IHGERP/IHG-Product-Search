@@ -1083,7 +1083,7 @@ def search_products_v2(
             _digest = hashlib.md5(
                 json.dumps(_cache_payload, sort_keys=True, default=str).encode("utf-8")
             ).hexdigest()
-            cache_key = "igh_search:search:v3:" + _digest
+            cache_key = "igh_search:search:v4:" + _digest
     except Exception:
         cache_key = None
 
@@ -1106,8 +1106,9 @@ def search_products_v2(
     client = create_typesense_client()
     parsed_filters = parse_search_filters(filters)
     query_resolution = resolve_effective_query(query=query, item_code_hint=item_code_hint)
-    query_text = query_resolution["effective_query"]
-    sku_like = query_resolution["sku_like"]
+    multi_item_codes = parse_item_code_list(query or item_code_hint)
+    query_text = "*" if multi_item_codes else query_resolution["effective_query"]
+    sku_like = bool(multi_item_codes) or query_resolution["sku_like"]
     sort_resolution = resolve_sort_by(sort_by, sku_like=sku_like, strict_sort=strict_sort)
 
     if per_page not in (None, ""):
@@ -1124,6 +1125,15 @@ def search_products_v2(
         "sort_by": sort_resolution["final_sort"],
         "include_fields": ",".join(SEARCH_RESULT_FIELDS),
     }
+
+    if multi_item_codes:
+        normalized_codes = [normalize_item_code(code) for code in multi_item_codes]
+        code_filter = "item_code_normalized:=[{0}]".format(
+            ",".join(_backtick_quote(code) for code in normalized_codes)
+        )
+        search_parameters["filter_by"] = " && ".join(
+            clause for clause in (search_parameters.get("filter_by"), code_filter) if clause
+        )
 
     # A catalogue browse uses q="*". Sorting every document by _text_match is
     # needlessly expensive because there is no text match to rank. Use the two
@@ -1252,6 +1262,7 @@ def search_products_v2(
             "aliased_sort": sort_resolution["aliased_sort"],
             "final_sort": sort_resolution["final_sort"],
             "sku_like": sku_like,
+            "multi_item_codes": multi_item_codes,
             "parsed_filters": parsed_filters,
             "fallback_reasons": sort_resolution["fallback_reasons"],
             "search_parameters": search_parameters,
@@ -1308,6 +1319,7 @@ def search_products_v2(
         "normalized_query": query_resolution["normalized_query"],
         "effective_query": query_text,
         "sku_like": sku_like,
+        "multi_item_codes": multi_item_codes,
         "requested_sort": cstr(sort_by or ""),
         "aliased_sort": sort_resolution["aliased_sort"],
         "applied_sort": sort_resolution["final_sort"],
@@ -1324,7 +1336,7 @@ def search_products_v2(
     }
     response["freshness_ts"] = now_datetime().isoformat()
     response["timings"] = {"index_roundtrip_ms": index_ms, "stock_ms": stock_ms, "total_ms": latency_ms}
-    response["matching_mode"] = "literal" if literal else "standard"
+    response["matching_mode"] = "item_code_list" if multi_item_codes else ("literal" if literal else "standard")
     if cache_key:
         try:
             frappe.cache().set_value(cache_key, response, expires_in_sec=cache_ttl)
@@ -2004,6 +2016,29 @@ def is_sku_like(value):
             or (is_compact_code and is_uppercase_alpha_code)
         )
     )
+
+
+def parse_item_code_list(value, limit=100):
+    """Return a unique pasted SKU list, or [] for an ordinary search query."""
+    raw_value = cstr(value or "").strip()
+    if not raw_value or not re.search(r"[,;\n\r]", raw_value):
+        return []
+
+    candidates = [part.strip() for part in re.split(r"[,;\n\r]+", raw_value) if part.strip()]
+    if len(candidates) < 2 or len(candidates) > cint(limit):
+        return []
+    if not all(is_sku_like(candidate) for candidate in candidates):
+        return []
+
+    unique_codes = []
+    seen = set()
+    for candidate in candidates:
+        normalized = normalize_item_code(candidate)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_codes.append(candidate)
+    return unique_codes if len(unique_codes) >= 2 else []
 
 
 def calculate_similarity_score(source_document, candidate_document):
