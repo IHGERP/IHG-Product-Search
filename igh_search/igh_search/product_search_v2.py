@@ -406,6 +406,11 @@ def resolve_typesense_connection():
 
 def create_typesense_client():
     connection = resolve_typesense_connection()
+    conf = frappe.conf or {}
+    timeout_seconds = max(
+        1.0,
+        min(flt(conf.get("igh_search_typesense_timeout_seconds") or 8), 25.0),
+    )
     return typesense.Client(
         {
             "nodes": [
@@ -416,7 +421,11 @@ def create_typesense_client():
                 }
             ],
             "api_key": connection["api_key"],
-            "connection_timeout_seconds": 120,
+            # The frontend proxy stops waiting after 30 seconds. One bounded
+            # attempt leaves enough time for the exact-SKU ERP fallback below
+            # and prevents timed-out requests from occupying Frappe workers.
+            "connection_timeout_seconds": timeout_seconds,
+            "num_retries": 0,
         }
     )
 
@@ -1270,9 +1279,31 @@ def search_products_v2(
     )
 
     index_started = time.perf_counter()
-    response = client.collections[target_collection].documents.search(
-        search_parameters
+    exact_fallback_codes = resolve_exact_item_codes_for_fallback(
+        query=query,
+        item_code_hint=item_code_hint,
+        multi_item_codes=multi_item_codes,
     )
+    try:
+        response = client.collections[target_collection].documents.search(
+            search_parameters
+        )
+    except Exception:
+        # An exact item-code lookup should remain available when Typesense is
+        # briefly unreachable. ERP is authoritative for these records, and the
+        # frontend clears catalogue filters before exact-code searches.
+        if exact_fallback_codes and not parsed_filters:
+            frappe.log_error(
+                frappe.get_traceback(),
+                "IGH Search V2: Typesense unavailable; exact SKU fallback used",
+            )
+            response = build_erp_exact_item_response(
+                exact_fallback_codes,
+                include_inactive=include_inactive,
+            )
+            _degraded["exact_sku_erp_fallback"] = True
+        else:
+            raise
     index_ms = round((time.perf_counter() - index_started) * 1000)
     stock_started = time.perf_counter()
 
@@ -1336,7 +1367,11 @@ def search_products_v2(
     }
     response["freshness_ts"] = now_datetime().isoformat()
     response["timings"] = {"index_roundtrip_ms": index_ms, "stock_ms": stock_ms, "total_ms": latency_ms}
-    response["matching_mode"] = "item_code_list" if multi_item_codes else ("literal" if literal else "standard")
+    response["matching_mode"] = (
+        "exact_sku_erp_fallback"
+        if _degraded.get("exact_sku_erp_fallback")
+        else ("item_code_list" if multi_item_codes else ("literal" if literal else "standard"))
+    )
     if cache_key:
         try:
             frappe.cache().set_value(cache_key, response, expires_in_sec=cache_ttl)
@@ -2039,6 +2074,148 @@ def parse_item_code_list(value, limit=100):
         seen.add(normalized)
         unique_codes.append(candidate)
     return unique_codes if len(unique_codes) >= 2 else []
+
+
+def resolve_exact_item_codes_for_fallback(query=None, item_code_hint=None, multi_item_codes=None):
+    """Return codes that are safe to resolve directly from ERP after an index outage."""
+    if multi_item_codes:
+        return list(multi_item_codes)
+
+    candidate = cstr(item_code_hint or query or "").strip()
+    if not candidate or not is_sku_like(candidate):
+        return []
+    return [candidate] if frappe.db.exists("Item", candidate) else []
+
+
+def build_erp_exact_item_response(item_codes, include_inactive=0):
+    """Build lean search hits for exact codes using authoritative ERP data."""
+    item_codes = [cstr(code).strip() for code in (item_codes or []) if cstr(code).strip()]
+    if not item_codes:
+        return {"hits": [], "found": 0, "facet_counts": []}
+
+    item_meta = frappe.get_meta("Item")
+    optional_fields = [
+        "category_list",
+        "series",
+        "power",
+        "color_temp",
+        "color_temp_",
+        "ip_rate",
+        "beam_angle",
+        "mounting",
+        "lamp_type",
+        "material",
+        "body_finish",
+        "warranty",
+        "warranty_",
+        "input_voltage",
+        "input",
+        "output_voltage",
+        "output_current",
+        "lumen_output",
+    ]
+    fields = [
+        "name",
+        "item_code",
+        "item_name",
+        "description",
+        "brand",
+        "item_group",
+        "stock_uom",
+        "image",
+        "disabled",
+        "has_variants",
+        "variant_of",
+        "is_stock_item",
+    ] + [field for field in optional_fields if item_meta.has_field(field)]
+    filters = {"name": ["in", item_codes]}
+    if not cint(include_inactive):
+        filters["disabled"] = 0
+    rows = frappe.get_all("Item", filters=filters, fields=fields, limit_page_length=len(item_codes))
+    rows_by_code = {
+        normalize_item_code(row.get("item_code") or row.get("name")): row for row in rows
+    }
+
+    from igh_search.igh_search.product_stock_freshness import get_authoritative_stock_snapshot
+
+    stock_by_code = {
+        normalize_item_code(code): snapshot
+        for code, snapshot in get_authoritative_stock_snapshot(item_codes).items()
+    }
+    price_list = (
+        frappe.db.get_single_value("Selling Settings", "selling_price_list")
+        or "Standard Selling"
+    )
+    price_rows = frappe.get_all(
+        "Item Price",
+        filters={
+            "item_code": ["in", item_codes],
+            "price_list": price_list,
+            "selling": 1,
+        },
+        fields=["item_code", "price_list_rate"],
+        order_by="modified desc",
+        limit_page_length=max(len(item_codes) * 3, len(item_codes)),
+    )
+    rate_by_code = {}
+    for price_row in price_rows:
+        rate_by_code.setdefault(
+            normalize_item_code(price_row.get("item_code")),
+            flt(price_row.get("price_list_rate")),
+        )
+
+    hits = []
+    for requested_code in item_codes:
+        normalized_code = normalize_item_code(requested_code)
+        row = rows_by_code.get(normalized_code)
+        if not row:
+            continue
+        code = cstr(row.get("item_code") or row.get("name") or requested_code)
+        stock = stock_by_code.get(normalized_code) or {}
+        total_stock = flt(stock.get("total_stock") or stock.get("stock") or 0)
+        document = {
+            "id": code,
+            "item_code": code,
+            "item_code_normalized": normalize_item_code(code),
+            "item_name": cstr(row.get("item_name") or code),
+            "description": cstr(row.get("description")),
+            "brand": cstr(row.get("brand")),
+            "category_list": cstr(row.get("category_list") or row.get("item_group")),
+            "item_group": cstr(row.get("item_group")),
+            "series": cstr(row.get("series")),
+            "stock_uom": cstr(row.get("stock_uom") or "Nos"),
+            "image": cstr(row.get("image")),
+            "is_active": 0 if cint(row.get("disabled")) else 1,
+            "disabled": cint(row.get("disabled")),
+            "is_variant": 1 if cstr(row.get("variant_of")) else 0,
+            "variant_of": cstr(row.get("variant_of")),
+            "parent_item_code": cstr(row.get("variant_of")),
+            "has_variants": bool(row.get("has_variants")),
+            "is_stock_item": bool(row.get("is_stock_item")),
+            "rate": rate_by_code.get(normalized_code, 0),
+            "offer_rate": 0,
+            "stock": total_stock,
+            "total_stock": total_stock,
+            "in_stock": 1 if total_stock > 0 else 0,
+            "power": cstr(row.get("power")),
+            "color_temp": normalize_color_temp(row.get("color_temp") or row.get("color_temp_")),
+            "ip_rate": normalize_ip_rate(row.get("ip_rate")),
+            "beam_angle": cstr(row.get("beam_angle")),
+            "mounting": cstr(row.get("mounting")),
+            "lamp_type": cstr(row.get("lamp_type")),
+            "material": cstr(row.get("material")),
+            "body_finish": cstr(row.get("body_finish")),
+            "warranty": cstr(row.get("warranty") or row.get("warranty_")),
+            "input_voltage": cstr(row.get("input_voltage") or row.get("input")),
+            "output_voltage": cstr(row.get("output_voltage")),
+            "output_current": cstr(row.get("output_current")),
+            "lumen_output": cstr(row.get("lumen_output")),
+        }
+        document.update(normalize_lumen_fields(document.get("lumen_output")))
+        document["spec_summary"] = build_spec_summary(document)
+        hits.append({"document": document, "text_match": 0})
+
+    return {"hits": hits, "found": len(hits), "facet_counts": []}
 
 
 def calculate_similarity_score(source_document, candidate_document):

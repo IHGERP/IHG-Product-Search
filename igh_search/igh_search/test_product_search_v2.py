@@ -28,6 +28,8 @@ class TestProductSearchV2(FrappeTestCase):
 
             def search(self, search_parameters):
                 self.last_search_parameters = search_parameters
+                if isinstance(self.payload, Exception):
+                    raise self.payload
                 return dict(self.payload)
 
         class FakeCollection:
@@ -277,3 +279,36 @@ class TestProductSearchV2(FrappeTestCase):
             parameters["filter_by"],
         )
         self.assertEqual(response["matching_mode"], "item_code_list")
+
+    @patch("igh_search.igh_search.product_search_v2.ensure_query_access")
+    @patch("igh_search.igh_search.product_search_v2.create_typesense_client")
+    def test_exact_item_search_falls_back_to_erp_when_typesense_times_out(
+        self, create_client_mock, _ensure_query_access_mock
+    ):
+        create_client_mock.return_value = self._make_fake_client(TimeoutError("index timeout"))
+        fallback_response = {
+            "hits": [{"document": {"item_code": "FM121011.XGR.09.120", "stock": 590}}],
+            "found": 1,
+            "facet_counts": [],
+        }
+
+        with patch(
+            "igh_search.igh_search.product_search_v2.get_response_cache_ttl",
+            return_value=0,
+        ), patch(
+            "igh_search.igh_search.product_search_v2.resolve_exact_item_codes_for_fallback",
+            return_value=["FM121011.XGR.09.120"],
+        ), patch(
+            "igh_search.igh_search.product_search_v2.build_erp_exact_item_response",
+            return_value=fallback_response,
+        ) as fallback_mock, patch(
+            "igh_search.igh_search.product_search_v2.frappe.log_error"
+        ):
+            response = search_products_v2(query="FM121011.XGR.09.120")
+
+        fallback_mock.assert_called_once_with(
+            ["FM121011.XGR.09.120"],
+            include_inactive=0,
+        )
+        self.assertEqual(response["found"], 1)
+        self.assertEqual(response["matching_mode"], "exact_sku_erp_fallback")
